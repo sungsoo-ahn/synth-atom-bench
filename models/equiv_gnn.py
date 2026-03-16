@@ -224,6 +224,19 @@ class EquivGNNVelocityNetwork(nn.Module):
             EquivGNNMixing(hidden_dim) for _ in range(num_layers)
         ])
 
+        # adaLN-Zero: per-layer timestep modulation (scale, shift, gate for interaction + mixing)
+        # Each layer produces 6H values: (scale_i, shift_i, gate_i, scale_m, shift_m, gate_m)
+        self.adaln_projs = nn.ModuleList([
+            nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(hidden_dim, 6 * hidden_dim),
+            ) for _ in range(num_layers)
+        ])
+        # Zero-initialize the final linear so layers start as identity
+        for proj in self.adaln_projs:
+            nn.init.zeros_(proj[1].weight)
+            nn.init.zeros_(proj[1].bias)
+
         # Position-to-vector projection: scalar gate for initial vector features
         self.pos_to_vec = nn.Linear(hidden_dim, hidden_dim)
 
@@ -311,10 +324,24 @@ class EquivGNNVelocityNetwork(nn.Module):
         gate = self.pos_to_vec(s)  # (batch*N, H) — scalar-gated projection
         v = pos_flat[:, :, None] * gate[:, None, :]  # (batch*N, 3, H)
 
-        # Message passing
-        for interaction, mixing in zip(self.interactions, self.mixings):
-            s, v = interaction(s, v, idx_i, idx_j, rbf, f_cut, dir_ij)
-            s, v = mixing(s, v)
+        # Message passing with adaLN-Zero timestep modulation
+        for interaction, mixing, adaln_proj in zip(self.interactions, self.mixings, self.adaln_projs):
+            # Get per-layer modulation from timestep
+            adaln = adaln_proj(t_emb)  # (batch*N, 6H)
+            scale_i, shift_i, gate_i, scale_m, shift_m, gate_m = adaln.chunk(6, dim=-1)
+
+            # Modulate scalar features before interaction
+            s_mod = (1 + scale_i) * s + shift_i
+            s_new, v_new = interaction(s_mod, v, idx_i, idx_j, rbf, f_cut, dir_ij)
+            # Gate the update (residual is already inside interaction, so we gate the full output)
+            s = s + gate_i * (s_new - s_mod)
+            v = v_new  # vector features don't get gated (equivariance)
+
+            # Modulate before mixing
+            s_mod = (1 + scale_m) * s + shift_m
+            s_new, v_new = mixing(s_mod, v)
+            s = s + gate_m * (s_new - s_mod)
+            v = v_new
 
         # Velocity readout: (batch*N, 3, H) -> (batch*N, 3, 1) -> (batch*N, 3)
         velocity = self.velocity_readout(v).squeeze(-1)

@@ -1,8 +1,9 @@
-"""W&B logger and GPU compute tracker."""
+"""File-based logger and GPU compute tracker."""
 
-import tempfile
+import json
+import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 
@@ -11,12 +12,11 @@ import torch
 class LoggerConfig:
     """Configuration for experiment logging."""
 
-    project: str = "synthbench3d"
-    entity: str | None = None
     enabled: bool = True
     log_every_n_steps: int = 100
     eval_every_n_epochs: int = 1
     checkpoint_every_n_epochs: int = 5
+    log_dir: str = "outputs/logs"
 
 
 class ComputeTracker:
@@ -60,7 +60,15 @@ class ComputeTracker:
 
 
 class Logger:
-    """W&B experiment logger. All methods are no-ops when disabled."""
+    """File-based experiment logger. Writes JSON lines to a log directory.
+
+    Log directory structure:
+        {log_dir}/{run_name}/
+            train.jsonl     - training metrics (one JSON object per line)
+            eval.jsonl      - evaluation metrics
+            config.json     - model/run configuration
+            scaling.jsonl   - scaling results
+    """
 
     def __init__(
         self,
@@ -69,32 +77,31 @@ class Logger:
         model_config: dict | None = None,
     ):
         self._config = config
-        self._wandb = None
-        self._scaling_table = None
+        self._log_dir: str | None = None
 
         if not config.enabled:
             return
 
-        import wandb
+        run_name = run_name or "default"
+        self._log_dir = os.path.join(config.log_dir, run_name)
+        os.makedirs(self._log_dir, exist_ok=True)
 
-        self._wandb = wandb
-        init_kwargs = {
-            "project": config.project,
-            "name": run_name,
-        }
-        if config.entity:
-            init_kwargs["entity"] = config.entity
         if model_config:
-            init_kwargs["config"] = model_config
-        wandb.init(**init_kwargs)
-        self._scaling_table = wandb.Table(
-            columns=["architecture", "compute_budget", "best_clash_rate", "best_gr_distance", "param_count", "flops_per_step"]
-        )
+            config_path = os.path.join(self._log_dir, "config.json")
+            with open(config_path, "w") as f:
+                json.dump(model_config, f, indent=2, default=str)
+
+    def _append(self, filename: str, data: dict) -> None:
+        if self._log_dir is None:
+            return
+        path = os.path.join(self._log_dir, filename)
+        with open(path, "a") as f:
+            f.write(json.dumps(data, default=str) + "\n")
 
     def log_train(self, metrics: dict, step: int) -> None:
-        if self._wandb is None:
+        if self._log_dir is None:
             return
-        self._wandb.log(metrics, step=step)
+        self._append("train.jsonl", {"step": step, **metrics})
 
     def log_eval(
         self,
@@ -103,46 +110,35 @@ class Logger:
         box_size: float,
         step: int,
     ) -> None:
-        if self._wandb is None:
+        if self._log_dir is None:
             return
 
         import numpy as np
         from data.validate import pair_correlation
-        from viz.metrics import plot_gr, plot_min_distance_hist
         from metrics.clash_rate import clash_rate_batched
 
         cr = clash_rate_batched(positions, radius)
-        metrics: dict = {"eval/clash_rate": cr}
-
-        # g(r) plot
-        import os
-        import matplotlib.pyplot as plt
+        metrics: dict = {"step": step, "eval/clash_rate": cr}
 
         pos_np = positions.cpu().numpy()
         r, g_r = pair_correlation(pos_np, box_size)
-        tmp_files = []
 
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            gr_path = f.name
-        tmp_files.append(gr_path)
+        # Save plots to log dir
+        import matplotlib.pyplot as plt
+        from viz.metrics import plot_gr, plot_min_distance_hist
+
+        plots_dir = os.path.join(self._log_dir, "plots")
+        os.makedirs(plots_dir, exist_ok=True)
+
         fig = plot_gr(r, g_r, radius)
-        fig.savefig(gr_path, dpi=150)
+        fig.savefig(os.path.join(plots_dir, f"gr_step{step}.png"), dpi=150)
         plt.close(fig)
-        metrics["eval/pair_correlation"] = self._wandb.Image(gr_path)
 
-        # Min distance histogram
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            hist_path = f.name
-        tmp_files.append(hist_path)
         fig = plot_min_distance_hist(pos_np, radius)
-        fig.savefig(hist_path, dpi=150)
+        fig.savefig(os.path.join(plots_dir, f"min_dist_step{step}.png"), dpi=150)
         plt.close(fig)
-        metrics["eval/min_distance_hist"] = self._wandb.Image(hist_path)
 
-        self._wandb.log(metrics, step=step)
-
-        for p in tmp_files:
-            os.unlink(p)
+        self._append("eval.jsonl", metrics)
 
     def log_model_config(
         self,
@@ -150,21 +146,27 @@ class Logger:
         param_count: int,
         flops_per_step: float | None = None,
     ) -> None:
-        if self._wandb is None:
+        if self._log_dir is None:
             return
-        self._wandb.config.update(
-            {
-                "architecture": architecture,
-                "param_count": param_count,
-                "flops_per_step": flops_per_step,
-            },
-            allow_val_change=True,
-        )
+        model_info = {
+            "architecture": architecture,
+            "param_count": param_count,
+            "flops_per_step": flops_per_step,
+        }
+        path = os.path.join(self._log_dir, "config.json")
+        # Merge with existing config if present
+        existing = {}
+        if os.path.isfile(path):
+            with open(path) as f:
+                existing = json.load(f)
+        existing.update(model_info)
+        with open(path, "w") as f:
+            json.dump(existing, f, indent=2, default=str)
 
     def log_compute(self, tracker: ComputeTracker, step: int) -> None:
-        if self._wandb is None:
+        if self._log_dir is None:
             return
-        self._wandb.log({"compute/gpu_hours": tracker.gpu_hours}, step=step)
+        self._append("train.jsonl", {"step": step, "compute/gpu_hours": tracker.gpu_hours})
 
     def log_scaling_point(
         self,
@@ -175,14 +177,16 @@ class Logger:
         param_count: int | None = None,
         flops_per_step: float | None = None,
     ) -> None:
-        if self._wandb is None or self._scaling_table is None:
+        if self._log_dir is None:
             return
-        self._scaling_table.add_data(
-            architecture, compute_budget, best_clash_rate, best_gr_distance, param_count, flops_per_step
-        )
-        self._wandb.log({"scaling/results": self._scaling_table})
+        self._append("scaling.jsonl", {
+            "architecture": architecture,
+            "compute_budget": compute_budget,
+            "best_clash_rate": best_clash_rate,
+            "best_gr_distance": best_gr_distance,
+            "param_count": param_count,
+            "flops_per_step": flops_per_step,
+        })
 
     def finish(self) -> None:
-        if self._wandb is None:
-            return
-        self._wandb.finish()
+        pass

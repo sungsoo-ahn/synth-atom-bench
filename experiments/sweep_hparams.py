@@ -54,7 +54,7 @@ def generate_commands(args):
         cmd = (
             f"uv run python experiments/train.py {override_str} "
             f"checkpoint.dir={ckpt_dir} "
-            f"logging.enabled={str(args.wandb).lower()} "
+            f"logging.enabled=true "
             f"hydra.run.dir={ckpt_dir}"
         )
         commands.append((run_name, cmd))
@@ -183,7 +183,6 @@ def main():
     common.add_argument("--archs", default=None, help="Comma-separated architectures (default: all)")
     common.add_argument("--sizes", default=None, help="Comma-separated sizes (default: small,medium,large)")
     common.add_argument("--lrs", default=None, help="Comma-separated learning rates")
-    common.add_argument("--wandb", action="store_true", help="Enable W&B logging")
 
     # Subcommands
     gen_parser = subparsers.add_parser("generate", parents=[common], help="Print sweep commands")

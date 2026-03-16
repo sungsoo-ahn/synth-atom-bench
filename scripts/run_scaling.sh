@@ -18,7 +18,6 @@ fi
 echo "Generating scaling grid..."
 uv run python experiments/scaling.py generate \
     --scaling_dir "$SCALING_DIR" \
-    --wandb \
     > "$SCALING_DIR/grid.txt"
 echo "Grid saved to $SCALING_DIR/grid.txt"
 echo "$(wc -l < "$SCALING_DIR/grid.txt") runs to execute."
@@ -27,8 +26,7 @@ echo "$(wc -l < "$SCALING_DIR/grid.txt") runs to execute."
 echo ""
 echo "Running scaling experiments..."
 uv run python experiments/scaling.py run \
-    --scaling_dir "$SCALING_DIR" \
-    --wandb
+    --scaling_dir "$SCALING_DIR"
 
 # Step 3: Collect results
 echo ""

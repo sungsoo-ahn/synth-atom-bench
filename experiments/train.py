@@ -25,29 +25,15 @@ import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
-from data.chain_dataset import ChainDataset
-from data.dataset import HardSphereDataset
+from data.validate import pair_correlation
 from experiments.checkpointing import CheckpointManager
 from experiments.logger import ComputeTracker, Logger, LoggerConfig
+from experiments.model_registry import MODEL_REGISTRY, SIZE_PRESETS
+from experiments.tasks import get_task
 from flow_matching.sampling import sample_batched
 from flow_matching.training import flow_matching_loss
-from data.validate import pair_correlation
-from metrics.bond_violation import bond_violation_rate_batched, nonbonded_clash_rate_batched
 from metrics.clash_rate import clash_rate_batched
 from metrics.gr_distance import gr_distance
-from experiments.model_registry import MODEL_REGISTRY, SIZE_PRESETS
-
-
-def is_chain_config(cfg: DictConfig) -> bool:
-    """Check if config describes a chain dataset (has bond_length)."""
-    return hasattr(cfg.data, "bond_length")
-
-
-def load_dataset(cfg: DictConfig, path: str):
-    """Load ChainDataset or HardSphereDataset based on config."""
-    if is_chain_config(cfg):
-        return ChainDataset(path)
-    return HardSphereDataset(path)
 
 
 def random_rotation_matrix(device: torch.device) -> torch.Tensor:
@@ -82,16 +68,17 @@ def count_flops(model: nn.Module, n_atoms: int, batch_size: int, device: torch.d
         return 6 * n_params * batch_size
 
 
-def build_model(cfg: DictConfig, box_size: float) -> nn.Module:
+def build_model(cfg: DictConfig, box_size: float, task) -> nn.Module:
     """Instantiate velocity network from config."""
     arch = cfg.model.arch
     if arch not in MODEL_REGISTRY:
         raise ValueError(f"Unknown architecture: {arch}. Available: {list(MODEL_REGISTRY.keys())}")
     kwargs = dict(cfg.model.model_kwargs)
     # Override cutoff to match data
-    cutoff_key = "cutoff"
-    if cutoff_key in kwargs:
-        kwargs[cutoff_key] = box_size * 1.5
+    if "cutoff" in kwargs:
+        kwargs["cutoff"] = box_size * 1.5
+    # Task-specific model kwargs (e.g. atom_ordering for chains)
+    kwargs.update(task.model_kwargs())
     return MODEL_REGISTRY[arch](**kwargs)
 
 
@@ -114,13 +101,14 @@ def evaluate(
     dataset,
     cfg: DictConfig,
     device: torch.device,
+    task,
     gt_r: "np.ndarray | None" = None,
     gt_g_r: "np.ndarray | None" = None,
 ) -> dict:
     """Generate samples and compute metrics.
 
     Returns dict with keys: clash_rate, gr_distance, samples,
-    and for chain data: bond_violation_rate, nonbonded_clash_rate.
+    plus any task-specific metrics.
     """
     import numpy as np
 
@@ -141,14 +129,22 @@ def evaluate(
         grd = gr_distance(samples.numpy(), gt_r, gt_g_r, dataset.box_size)
 
     result = {"clash_rate": cr, "gr_distance": grd, "samples": samples}
-
-    # Chain-specific metrics
-    if is_chain_config(cfg):
-        result["bond_violation_rate"] = bond_violation_rate_batched(samples, dataset.bond_length)
-        result["nonbonded_clash_rate"] = nonbonded_clash_rate_batched(samples, dataset.radius)
+    result.update(task.compute_metrics(samples, dataset))
 
     model.train()
     return result
+
+
+def _format_eval_msg(step: int | str, ev: dict, best_grd: float) -> str:
+    """Format evaluation results into a log message."""
+    parts = [f"Step {step:>6s}" if isinstance(step, str) else f"Step {step:6d}",
+             f"Eval clash rate: {ev['clash_rate']:.4f}",
+             f"g(r) dist: {ev['gr_distance']:.4f}"]
+    for k, v in ev.items():
+        if k not in ("clash_rate", "gr_distance", "samples"):
+            parts.append(f"{k}: {v:.4f}")
+    parts.append(f"Best g(r): {best_grd:.4f}")
+    return "  " + " | ".join(parts)
 
 
 @hydra.main(config_path="../configs", config_name="train", version_base=None)
@@ -180,13 +176,16 @@ def main(cfg: DictConfig) -> None:
         device = torch.device("cpu")
     print(f"Device: {device}")
 
+    # Task
+    task = get_task(cfg)
+
     # Load dataset
     data_dir = cfg.data.data_dir
     train_path = os.path.join(data_dir, "train.npz")
-    dataset = load_dataset(cfg, train_path)
+    dataset = task.load_dataset(train_path)
     box_size = dataset.box_size
     n_atoms = dataset.positions.shape[1]
-    print(f"Dataset: {len(dataset)} samples, N={n_atoms}, box_size={box_size:.4f}")
+    print(f"Dataset: {len(dataset)} samples, {task.describe_data(dataset)}")
 
     # Precompute ground-truth g(r) for evaluation metric
     print("Precomputing ground-truth g(r)...")
@@ -205,7 +204,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     # Build model
-    model = build_model(cfg, box_size).to(device)
+    model = build_model(cfg, box_size, task).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Architecture: {cfg.model.arch} | Parameters: {n_params:,}")
 
@@ -257,15 +256,11 @@ def main(cfg: DictConfig) -> None:
 
     # Logger
     logger_config = LoggerConfig(
-        project=cfg.logging.project,
-        entity=cfg.logging.get("entity"),
         enabled=cfg.logging.enabled,
         log_every_n_steps=cfg.logging.log_every_n_steps,
+        log_dir=cfg.logging.get("log_dir", "outputs/logs"),
     )
-    if is_chain_config(cfg):
-        run_name = f"{cfg.model.arch}_N{n_atoms}_chain"
-    else:
-        run_name = f"{cfg.model.arch}_N{n_atoms}_eta{cfg.data.eta}"
+    run_name = task.run_name(cfg, n_atoms)
     config_dict = OmegaConf.to_container(cfg, resolve=True)
     logger = Logger(logger_config, run_name=run_name, model_config=config_dict)
     logger.log_model_config(cfg.model.arch, n_params, flops_per_step)
@@ -321,26 +316,25 @@ def main(cfg: DictConfig) -> None:
 
         # Evaluate + checkpoint
         if step % cfg.eval.every_n_steps == 0:
-            ev = evaluate(model, dataset, cfg, device, gt_r, gt_g_r)
-            cr, grd, samples = ev["clash_rate"], ev["gr_distance"], ev["samples"]
+            ev = evaluate(model, dataset, cfg, device, task, gt_r, gt_g_r)
             total_flops = flops_per_step * step
-            logger.log_eval(samples, dataset.radius, dataset.box_size, step)
-            log_metrics = {"eval/clash_rate": cr, "eval/gr_distance": grd, "train/total_flops": total_flops}
-            ckpt_kwargs = dict(gr_distance=grd)
-            if is_chain_config(cfg):
-                bvr = ev["bond_violation_rate"]
-                ncr = ev["nonbonded_clash_rate"]
-                log_metrics["eval/bond_violation_rate"] = bvr
-                log_metrics["eval/nonbonded_clash_rate"] = ncr
-                ckpt_kwargs["bond_violation_rate"] = bvr
-                ckpt_kwargs["nonbonded_clash_rate"] = ncr
+            logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step)
+
+            # Log all metrics
+            log_metrics = {"train/total_flops": total_flops}
+            ckpt_kwargs = {}
+            for k, v in ev.items():
+                if k != "samples":
+                    log_metrics[f"eval/{k}"] = v
+                    ckpt_kwargs[k] = v
             logger.log_train(log_metrics, step=step)
-            ckpt_mgr.save(model, optimizer, epoch=0, step=step, clash_rate=cr, config=config_dict, **ckpt_kwargs)
-            msg = f"  Step {step:6d} | Eval clash rate: {cr:.4f} | g(r) dist: {grd:.4f}"
-            if is_chain_config(cfg):
-                msg += f" | bond viol: {bvr:.4f} | nb clash: {ncr:.4f}"
-            msg += f" | Best g(r): {ckpt_mgr.best_gr_distance:.4f}"
-            print(msg)
+
+            # Save checkpoint (clash_rate and gr_distance are positional, rest are kwargs)
+            cr = ckpt_kwargs.pop("clash_rate")
+            grd = ckpt_kwargs.pop("gr_distance")
+            ckpt_mgr.save(model, optimizer, epoch=0, step=step,
+                          clash_rate=cr, config=config_dict, gr_distance=grd, **ckpt_kwargs)
+            print(_format_eval_msg(step, ev, ckpt_mgr.best_gr_distance))
 
         # Periodic checkpoint (without eval)
         elif step % cfg.checkpoint.every_n_steps == 0:
@@ -352,19 +346,17 @@ def main(cfg: DictConfig) -> None:
 
     # Final evaluation
     print("\nFinal evaluation...")
-    ev = evaluate(model, dataset, cfg, device, gt_r, gt_g_r)
-    cr, grd, samples = ev["clash_rate"], ev["gr_distance"], ev["samples"]
-    logger.log_eval(samples, dataset.radius, dataset.box_size, step)
-    ckpt_kwargs = dict(gr_distance=grd)
-    if is_chain_config(cfg):
-        ckpt_kwargs["bond_violation_rate"] = ev["bond_violation_rate"]
-        ckpt_kwargs["nonbonded_clash_rate"] = ev["nonbonded_clash_rate"]
-    ckpt_mgr.save(model, optimizer, epoch=0, step=step, clash_rate=cr, config=config_dict, **ckpt_kwargs)
-    msg = f"Final clash rate: {cr:.4f} | g(r) dist: {grd:.4f}"
-    if is_chain_config(cfg):
-        msg += f" | bond viol: {ev['bond_violation_rate']:.4f} | nb clash: {ev['nonbonded_clash_rate']:.4f}"
-    msg += f" | Best g(r): {ckpt_mgr.best_gr_distance:.4f}"
-    print(msg)
+    ev = evaluate(model, dataset, cfg, device, task, gt_r, gt_g_r)
+    logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step)
+    ckpt_kwargs = {}
+    for k, v in ev.items():
+        if k != "samples":
+            ckpt_kwargs[k] = v
+    cr = ckpt_kwargs.pop("clash_rate")
+    grd = ckpt_kwargs.pop("gr_distance")
+    ckpt_mgr.save(model, optimizer, epoch=0, step=step,
+                  clash_rate=cr, config=config_dict, gr_distance=grd, **ckpt_kwargs)
+    print(_format_eval_msg("Final", ev, ckpt_mgr.best_gr_distance))
 
     logger.finish()
     if torch.cuda.is_available():

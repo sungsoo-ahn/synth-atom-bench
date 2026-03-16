@@ -28,7 +28,6 @@ mkdir -p "$SCALING_DIR"
 uv run python experiments/scaling.py generate \
     --scaling_dir "$SCALING_DIR" \
     --data "$DATA_CONFIG" \
-    --wandb \
     > "$SCALING_DIR/grid.txt"
 echo "Grid saved to $SCALING_DIR/grid.txt"
 echo "$(wc -l < "$SCALING_DIR/grid.txt") runs to execute."
@@ -39,8 +38,7 @@ echo "Running scaling experiments..."
 uv run python experiments/scaling.py run \
     --scaling_dir "$SCALING_DIR" \
     --data "$DATA_CONFIG" \
-    --n_gpus "$N_GPUS" \
-    --wandb
+    --n_gpus "$N_GPUS"
 
 # Step 3: Collect results
 echo ""

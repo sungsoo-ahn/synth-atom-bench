@@ -109,7 +109,7 @@ def generate_grid(args):
             f"train.max_steps={max_steps} "
             f"{model_overrides} "
             f"checkpoint.dir={ckpt_dir} "
-            f"logging.enabled={str(args.wandb).lower()} "
+            f"logging.enabled=true "
             f"hydra.run.dir={ckpt_dir}"
         )
         commands.append((run_name, cmd, arch, size, lr, budget, max_steps, flops_per_step))
@@ -481,7 +481,7 @@ def fit_scaling(args):
         arch_data[arch]["nonbonded_clash_rate"] = np.array(arch_data[arch]["nonbonded_clash_rate"])[order]
 
     # Capitalize arch names for plotting (matches ARCH_COLORS keys)
-    arch_name_map = {"painn": "PaiNN", "transformer": "Transformer", "pairformer": "Pairformer"}
+    arch_name_map = {"equiv_gnn": "Equiv-GNN", "transformer": "Transformer", "pairformer": "Pairformer"}
     plot_data = {}
     for arch, d in arch_data.items():
         display_name = arch_name_map.get(arch, arch)
@@ -723,7 +723,6 @@ def main():
     common.add_argument("--batch_size", type=int, default=256, help="Batch size for FLOPs measurement")
     common.add_argument("--n_atoms", type=int, default=10, help="Number of atoms (auto-detected if --data set)")
     common.add_argument("--data", default=None, help="Hydra data config name (e.g. medium_large)")
-    common.add_argument("--wandb", action="store_true", help="Enable W&B logging")
     common.add_argument("--n_gpus", type=int, default=1, help="Number of GPUs for parallel execution")
 
     # Subcommands

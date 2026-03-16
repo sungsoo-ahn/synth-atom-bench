@@ -177,7 +177,7 @@ clash_rate(C) = a × C^(-α) + floor      (C = total training FLOPs)
 │   ├── scaling.py              # Compute-matched scaling sweep
 │   ├── sweep_hparams.py        # Hyperparameter sweep orchestrator
 │   ├── model_registry.py       # Shared model registry and size presets
-│   ├── logger.py               # W&B logging wrapper
+│   ├── logger.py               # File-based logging (JSONL)
 │   └── checkpointing.py        # Checkpoint management
 ├── scripts/
 │   ├── run_scaling.sh
@@ -207,17 +207,12 @@ clash_rate(C) = a × C^(-α) + floor      (C = total training FLOPs)
 
 - PyTorch
 - Hydra for configs
-- wandb for logging
+- File-based JSONL logging (outputs/logs/)
 - numpy for data generation
 - Package manager: always use `uv` (never pip)
   - Install packages: `uv add <package>`
   - Run scripts: `uv run <script>`
   - Sync environment: `uv sync`
-
-## W&B Setup
-
-- W&B login token is sourced from `~/.zshrc` (environment variable)
-- No need to run `wandb login` manually — token is available in the shell environment
 
 ## Output Directory Convention
 
@@ -240,7 +235,7 @@ Rules:
 - **Clean up after test/debug runs.** If you generate temporary files for testing (e.g. small sample counts, scratch plots), delete them when done. Do not leave behind files named `test_*`, `tmp_*`, `debug_*`, or similar in `outputs/`.
 - **No stale checkpoints.** When a training run is superseded or was a failed experiment, remove its checkpoint directory rather than leaving dead weights around.
 - **Name files descriptively.** Use the pattern `{split}_{setting}.npz` for data (e.g. `train.npz`, `val.npz`, `test.npz`) and `{description}.png` for plots. Never use generic names like `output.npz` or `plot.png`.
-- **The `outputs/` directory is gitignored.** It must never be committed. If a result needs to be preserved, export it to a report or wandb.
+- **The `outputs/` directory is gitignored.** It must never be committed.
 
 ## Key Design Decisions
 

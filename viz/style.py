@@ -9,12 +9,12 @@ import matplotlib.pyplot as plt
 
 # Architecture visual identity
 ARCH_COLORS = {
-    "PaiNN": "#4C72B0",
+    "Equiv-GNN": "#4C72B0",
     "Transformer": "#C44E52",
     "Pairformer": "#8172B3",
 }
 ARCH_MARKERS = {
-    "PaiNN": "o",
+    "Equiv-GNN": "o",
     "Transformer": "^",
     "Pairformer": "D",
 }

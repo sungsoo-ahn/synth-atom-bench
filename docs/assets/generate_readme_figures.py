@@ -100,7 +100,7 @@ def _load_scaling_results(results_path, metric_key="best_clash_rate"):
         raw = json.load(f)
 
     best = raw["best_per_budget"]
-    arch_name_map = {"painn": "PaiNN", "transformer": "Transformer", "pairformer": "Pairformer"}
+    arch_name_map = {"equiv_gnn": "Equiv-GNN", "transformer": "Transformer", "pairformer": "Pairformer"}
     arch_data = {}
     for entry in best.values():
         if entry["total_flops"] <= 0:

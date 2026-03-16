@@ -1,3 +1,4 @@
+task: hard_sphere
 data_dir: outputs/data/N50_eta0.3
 n_atoms: 50
 eta: 0.3

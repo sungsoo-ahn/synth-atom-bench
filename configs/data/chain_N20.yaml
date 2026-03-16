@@ -1,3 +1,4 @@
+task: chain
 data_dir: outputs/data/chain_N20
 n_atoms: 20
 bond_length: 1.0

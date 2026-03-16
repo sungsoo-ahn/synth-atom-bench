@@ -17,7 +17,7 @@ fi
 
 echo "Running sweep (max_steps=$MAX_STEPS, 8 GPUs)..."
 uv run python experiments/train.py --multirun \
-    model=painn,transformer,pairformer \
+    model=equiv_gnn,transformer,pairformer \
     model.size=small,medium,large \
     train.lr=1e-5,3e-5,1e-4,3e-4,1e-3 \
     train.max_steps=$MAX_STEPS \

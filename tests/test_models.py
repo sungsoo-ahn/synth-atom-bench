@@ -3,7 +3,7 @@
 import torch
 import pytest
 
-from models.painn import PaiNNVelocityNetwork, GaussianRBF, CosineCutoff
+from models.equiv_gnn import EquivGNNVelocityNetwork, GaussianRBF, CosineCutoff
 from models.common import SinusoidalTimestepEmbedding
 
 
@@ -61,10 +61,10 @@ class TestCosineCutoff:
         assert cutoff(d).item() == pytest.approx(0.0, abs=1e-6)
 
 
-class TestPaiNNVelocityNetwork:
+class TestEquivGNNVelocityNetwork:
     @pytest.fixture
     def model(self):
-        return PaiNNVelocityNetwork(hidden_dim=32, n_layers=2, n_rbf=10, cutoff=5.0)
+        return EquivGNNVelocityNetwork(hidden_dim=32, n_layers=2, n_rbf=10, cutoff=5.0)
 
     def test_forward_shape(self, model):
         positions = torch.randn(4, 10, 3)
@@ -88,7 +88,7 @@ class TestPaiNNVelocityNetwork:
         assert positions.grad.shape == (2, 5, 3)
 
     def test_equivariance(self, model):
-        """PaiNN should be equivariant: rotating input should rotate output."""
+        """Equiv-GNN should be equivariant: rotating input should rotate output."""
         torch.manual_seed(42)
         positions = torch.randn(2, 5, 3)
         t = torch.rand(2)

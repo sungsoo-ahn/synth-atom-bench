@@ -1,17 +1,17 @@
 """Shared model registry, size presets, and default configs."""
 
-from models.painn import PaiNNVelocityNetwork
+from models.equiv_gnn import EquivGNNVelocityNetwork
 from models.pairformer import PairformerVelocityNetwork
 from models.transformer import TransformerVelocityNetwork
 
 MODEL_REGISTRY = {
-    "painn": PaiNNVelocityNetwork,
+    "equiv_gnn": EquivGNNVelocityNetwork,
     "transformer": TransformerVelocityNetwork,
     "pairformer": PairformerVelocityNetwork,
 }
 
 SIZE_PRESETS = {
-    "painn": {
+    "equiv_gnn": {
         "xs": {"hidden_dim": 16, "n_layers": 2},
         "small": {"hidden_dim": 32, "n_layers": 3},
         "medium": {"hidden_dim": 128, "n_layers": 5},
@@ -36,7 +36,7 @@ SIZE_PRESETS = {
 
 # Default configs for model kwargs not in SIZE_PRESETS
 MODEL_DEFAULTS = {
-    "painn": {"n_rbf": 20, "cutoff": 10.0},
+    "equiv_gnn": {"n_rbf": 20, "cutoff": 10.0},
     "transformer": {"num_rbf": 64, "cutoff": 10.0, "mlp_ratio": 4.0},
     "pairformer": {"num_rbf": 64, "cutoff": 10.0, "expansion_factor": 4.0},
 }

@@ -1,6 +1,6 @@
 defaults:
   - data: medium_small
-  - model: painn
+  - model: equiv_gnn
   - logging: logging
   - _self_
 

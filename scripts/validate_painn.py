@@ -1,10 +1,10 @@
-"""End-to-end validation: train PaiNN on easy hard-sphere data, check it beats noise baseline."""
+"""End-to-end validation: train Equiv-GNN on easy hard-sphere data, check it beats noise baseline."""
 
 import sys
 import torch
 
 from data.generate import mcmc_sample
-from models.painn import PaiNNVelocityNetwork
+from models.equiv_gnn import EquivGNNVelocityNetwork
 from flow_matching.training import flow_matching_loss
 from flow_matching.sampling import sample
 from metrics.clash_rate import clash_rate
@@ -25,7 +25,7 @@ def main():
     x_train = x_train - box_size / 2
 
     # Create model
-    model = PaiNNVelocityNetwork(hidden_dim=64, n_layers=3, cutoff=box_size * 1.5).to(device)
+    model = EquivGNNVelocityNetwork(hidden_dim=64, n_layers=3, cutoff=box_size * 1.5).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}")
 

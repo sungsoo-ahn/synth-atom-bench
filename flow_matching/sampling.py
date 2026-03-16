@@ -32,9 +32,13 @@ def sample(
     dt = 1.0 / n_steps
 
     for i in range(n_steps):
-        t = torch.full((n_samples,), i * dt, device=device)
-        v = model(x, t)
-        x = x + v * dt
+        t_i = i * dt
+        t = torch.full((n_samples,), t_i, device=device)
+        v1 = model(x, t)
+        x_pred = x + v1 * dt
+        t_next = torch.full((n_samples,), min(t_i + dt, 1.0), device=device)
+        v2 = model(x_pred, t_next)
+        x = x + 0.5 * dt * (v1 + v2)
 
     return x
 

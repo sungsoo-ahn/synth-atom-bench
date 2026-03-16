@@ -36,7 +36,7 @@ SIZE_PRESETS = {
 
 # Default configs for model kwargs not in SIZE_PRESETS
 MODEL_DEFAULTS = {
-    "equiv_gnn": {"num_rbf": 20, "cutoff": 10.0},
+    "equiv_gnn": {"num_rbf": 32, "cutoff": 10.0},
     "transformer": {"num_rbf": 64, "cutoff": 10.0, "mlp_ratio": 4.0},
     "pairformer": {"num_rbf": 64, "cutoff": 10.0, "expansion_factor": 4.0},
 }

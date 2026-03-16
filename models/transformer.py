@@ -169,9 +169,13 @@ class TransformerVelocityNetwork(nn.Module):
         # Input: 3D coordinates → hidden_dim
         self.input_proj = nn.Linear(3, hidden_dim)
 
-        # Pairwise distance bias: distances → RBF → per-head bias
+        # Pairwise distance bias: distances → RBF → MLP → per-head bias
         self.rbf = GaussianRBF(num_rbf, cutoff)
-        self.pair_proj = nn.Linear(num_rbf, num_heads, bias=False)
+        self.pair_proj = nn.Sequential(
+            nn.Linear(num_rbf, num_rbf, bias=False),
+            nn.SiLU(),
+            nn.Linear(num_rbf, num_heads, bias=False),
+        )
 
         # Timestep → conditioning vector (sinusoidal + MLP)
         self.time_embed = SinusoidalTimestepEmbedding(hidden_dim)

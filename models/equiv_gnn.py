@@ -133,6 +133,11 @@ class EquivGNNMixing(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, 3 * hidden_dim),
         )
+        # Scalar-to-vector gate: controls which vector channels get updated
+        self.v_gate = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Sigmoid(),
+        )
 
     def forward(self, s: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
         """Intra-atomic refinement.
@@ -163,8 +168,9 @@ class EquivGNNMixing(nn.Module):
         dot_uv = torch.sum(Uv * Vv, dim=1)
 
         # Updates
+        gate = self.v_gate(s)  # (n_atoms, H)
         s = s + a_ss + a_sv * dot_uv
-        v = v + a_vv[:, None, :] * Uv
+        v = v + gate[:, None, :] * a_vv[:, None, :] * Uv
 
         return s, v
 

@@ -4,11 +4,28 @@ Reference: Schütt et al., "Equivariant message passing for the prediction of
 tensorial properties and molecular spectra" (2021).
 """
 
+import math
+
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from models.common import AtomOrderingEmbedding, GaussianRBF, SinusoidalTimestepEmbedding
+from models.common import AtomOrderingEmbedding, SinusoidalTimestepEmbedding
+
+
+class BesselRBF(nn.Module):
+    """Bessel radial basis functions (DimeNet-style). Orthogonal basis."""
+
+    def __init__(self, num_rbf: int = 20, cutoff: float = 10.0):
+        super().__init__()
+        self.cutoff = cutoff
+        freqs = torch.arange(1, num_rbf + 1, dtype=torch.float32) * math.pi / cutoff
+        self.register_buffer("freqs", freqs)
+        self.prefactor = math.sqrt(2.0 / cutoff)
+
+    def forward(self, distances: Tensor) -> Tensor:
+        d = distances.unsqueeze(-1)
+        return self.prefactor * torch.sin(self.freqs * d) / (d + 1e-8)
 
 
 class CosineCutoff(nn.Module):
@@ -175,7 +192,7 @@ class EquivGNNVelocityNetwork(nn.Module):
         self.atom_ordering = atom_ordering
 
         # Radial basis and cutoff
-        self.rbf = GaussianRBF(num_rbf, cutoff)
+        self.rbf = BesselRBF(num_rbf, cutoff)
         self.cosine_cutoff = CosineCutoff(cutoff)
 
         # Atom embedding: single learned embedding for identical atoms

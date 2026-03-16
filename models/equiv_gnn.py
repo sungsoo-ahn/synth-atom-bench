@@ -204,9 +204,13 @@ class EquivGNNVelocityNetwork(nn.Module):
         # Atom embedding: single learned embedding for identical atoms
         self.atom_embedding = nn.Parameter(torch.randn(1, hidden_dim))
 
-        # Timestep embedding
+        # Timestep embedding (2-layer MLP with SiLU, matching transformer)
         self.time_embed = SinusoidalTimestepEmbedding(hidden_dim)
-        self.time_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.time_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
 
         # Atom ordering embedding for chain tasks
         if atom_ordering:

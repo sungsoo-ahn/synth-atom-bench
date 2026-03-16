@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from models.common import SinusoidalTimestepEmbedding
+from models.common import AtomOrderingEmbedding, SinusoidalTimestepEmbedding
 
 
 class GaussianRBF(nn.Module):
@@ -174,10 +174,12 @@ class TransformerVelocityNetwork(nn.Module):
         num_rbf: int = 64,
         cutoff: float = 10.0,
         mlp_ratio: float = 4.0,
+        atom_ordering: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
+        self.atom_ordering = atom_ordering
 
         # Input: 3D coordinates → hidden_dim
         self.input_proj = nn.Linear(3, hidden_dim)
@@ -195,6 +197,10 @@ class TransformerVelocityNetwork(nn.Module):
         )
         nn.init.normal_(self.time_proj[0].weight, std=0.02)
         nn.init.normal_(self.time_proj[2].weight, std=0.02)
+
+        # Atom ordering embedding for chain tasks
+        if atom_ordering:
+            self.ordering_embed = AtomOrderingEmbedding(hidden_dim)
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
@@ -230,6 +236,12 @@ class TransformerVelocityNetwork(nn.Module):
         """
         pair_bias = self._compute_pair_bias(positions)
         x = self.input_proj(positions)
+
+        # Add atom ordering embedding for chain tasks
+        if self.atom_ordering:
+            N = positions.shape[1]
+            x = x + self.ordering_embed(N).unsqueeze(0)
+
         c = self.time_proj(self.time_embed(t))
 
         for block in self.blocks:

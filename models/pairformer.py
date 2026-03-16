@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from models.common import SinusoidalTimestepEmbedding
+from models.common import AtomOrderingEmbedding, SinusoidalTimestepEmbedding
 
 
 class GaussianRBF(nn.Module):
@@ -215,9 +215,11 @@ class PairformerVelocityNetwork(nn.Module):
         num_rbf: int = 64,
         cutoff: float = 10.0,
         expansion_factor: float = 4.0,
+        atom_ordering: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.atom_ordering = atom_ordering
 
         # Input projection: 3D coords -> single repr
         self.input_proj = nn.Linear(3, hidden_dim)
@@ -235,6 +237,10 @@ class PairformerVelocityNetwork(nn.Module):
         )
         nn.init.normal_(self.time_proj[0].weight, std=0.02)
         nn.init.normal_(self.time_proj[2].weight, std=0.02)
+
+        # Atom ordering embedding for chain tasks
+        if atom_ordering:
+            self.ordering_embed = AtomOrderingEmbedding(hidden_dim)
 
         # Pairformer blocks
         self.blocks = nn.ModuleList([
@@ -260,6 +266,12 @@ class PairformerVelocityNetwork(nn.Module):
         """
         # Single repr: input projection + timestep
         s = self.input_proj(positions)  # (B, N, hidden_dim)
+
+        # Add atom ordering embedding for chain tasks
+        if self.atom_ordering:
+            N = positions.shape[1]
+            s = s + self.ordering_embed(N).unsqueeze(0)
+
         t_emb = self.time_proj(self.time_embed(t))  # (B, hidden_dim)
         s = s + t_emb.unsqueeze(1)
 

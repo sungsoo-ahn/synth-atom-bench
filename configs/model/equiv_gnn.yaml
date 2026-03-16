@@ -2,6 +2,6 @@ arch: equiv_gnn
 size: medium
 model_kwargs:
   hidden_dim: 128
-  n_layers: 5
-  n_rbf: 20
+  num_layers: 5
+  num_rbf: 20
   cutoff: 10.0  # overridden at runtime to box_size * 1.5

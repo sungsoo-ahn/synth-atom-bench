@@ -8,29 +8,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from models.common import AtomOrderingEmbedding, SinusoidalTimestepEmbedding
-
-
-class GaussianRBF(nn.Module):
-    """Gaussian radial basis functions with evenly spaced centers."""
-
-    def __init__(self, n_rbf: int = 20, cutoff: float = 10.0):
-        super().__init__()
-        self.n_rbf = n_rbf
-        offsets = torch.linspace(0.0, cutoff, n_rbf)
-        self.register_buffer("offsets", offsets)
-        self.width = (offsets[1] - offsets[0]).item() if n_rbf > 1 else 1.0
-
-    def forward(self, distances: Tensor) -> Tensor:
-        """Expand distances into Gaussian basis.
-
-        Args:
-            distances: (n_pairs,).
-
-        Returns:
-            RBF features, (n_pairs, n_rbf).
-        """
-        return torch.exp(-0.5 * ((distances[:, None] - self.offsets[None, :]) / self.width) ** 2)
+from models.common import AtomOrderingEmbedding, GaussianRBF, SinusoidalTimestepEmbedding
 
 
 class CosineCutoff(nn.Module):
@@ -55,7 +33,7 @@ class CosineCutoff(nn.Module):
 class EquivGNNInteraction(nn.Module):
     """Equivariant GNN message passing block (PaiNN-style)."""
 
-    def __init__(self, hidden_dim: int, n_rbf: int):
+    def __init__(self, hidden_dim: int, num_rbf: int):
         super().__init__()
         # Context net on neighbor scalar features -> 3H for (ds, dvs, dvv)
         self.context_net = nn.Sequential(
@@ -65,7 +43,7 @@ class EquivGNNInteraction(nn.Module):
         )
         # Filter net on RBF -> 3H, modulated by cutoff
         self.filter_net = nn.Sequential(
-            nn.Linear(n_rbf, hidden_dim),
+            nn.Linear(num_rbf, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, 3 * hidden_dim),
         )
@@ -185,19 +163,19 @@ class EquivGNNVelocityNetwork(nn.Module):
     def __init__(
         self,
         hidden_dim: int = 128,
-        n_layers: int = 5,
-        n_rbf: int = 20,
+        num_layers: int = 5,
+        num_rbf: int = 20,
         cutoff: float = 10.0,
         atom_ordering: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.n_layers = n_layers
+        self.num_layers = num_layers
         self.cutoff = cutoff
         self.atom_ordering = atom_ordering
 
         # Radial basis and cutoff
-        self.rbf = GaussianRBF(n_rbf, cutoff)
+        self.rbf = GaussianRBF(num_rbf, cutoff)
         self.cosine_cutoff = CosineCutoff(cutoff)
 
         # Atom embedding: single learned embedding for identical atoms
@@ -213,10 +191,10 @@ class EquivGNNVelocityNetwork(nn.Module):
 
         # Message passing layers
         self.interactions = nn.ModuleList([
-            EquivGNNInteraction(hidden_dim, n_rbf) for _ in range(n_layers)
+            EquivGNNInteraction(hidden_dim, num_rbf) for _ in range(num_layers)
         ])
         self.mixings = nn.ModuleList([
-            EquivGNNMixing(hidden_dim) for _ in range(n_layers)
+            EquivGNNMixing(hidden_dim) for _ in range(num_layers)
         ])
 
         # Velocity readout from vector features: (n_atoms, 3, H) -> (n_atoms, 3)

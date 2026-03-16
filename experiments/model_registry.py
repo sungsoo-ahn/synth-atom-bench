@@ -1,4 +1,4 @@
-"""Shared model registry, size presets, and default configs."""
+"""Shared model registry, size presets, default configs, and display names."""
 
 from models.equiv_gnn import EquivGNNVelocityNetwork
 from models.pairformer import PairformerVelocityNetwork
@@ -12,11 +12,11 @@ MODEL_REGISTRY = {
 
 SIZE_PRESETS = {
     "equiv_gnn": {
-        "xs": {"hidden_dim": 16, "n_layers": 2},
-        "small": {"hidden_dim": 32, "n_layers": 3},
-        "medium": {"hidden_dim": 128, "n_layers": 5},
-        "large": {"hidden_dim": 256, "n_layers": 8},
-        "xl": {"hidden_dim": 512, "n_layers": 10},
+        "xs": {"hidden_dim": 16, "num_layers": 2},
+        "small": {"hidden_dim": 32, "num_layers": 3},
+        "medium": {"hidden_dim": 128, "num_layers": 5},
+        "large": {"hidden_dim": 256, "num_layers": 8},
+        "xl": {"hidden_dim": 512, "num_layers": 10},
     },
     "transformer": {
         "xs": {"hidden_dim": 32, "num_layers": 2, "num_heads": 2},
@@ -36,7 +36,14 @@ SIZE_PRESETS = {
 
 # Default configs for model kwargs not in SIZE_PRESETS
 MODEL_DEFAULTS = {
-    "equiv_gnn": {"n_rbf": 20, "cutoff": 10.0},
+    "equiv_gnn": {"num_rbf": 20, "cutoff": 10.0},
     "transformer": {"num_rbf": 64, "cutoff": 10.0, "mlp_ratio": 4.0},
     "pairformer": {"num_rbf": 64, "cutoff": 10.0, "expansion_factor": 4.0},
+}
+
+# Display names for plots and reports
+ARCH_DISPLAY_NAMES = {
+    "equiv_gnn": "Equiv-GNN",
+    "transformer": "Transformer",
+    "pairformer": "Pairformer",
 }

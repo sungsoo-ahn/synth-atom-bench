@@ -7,6 +7,30 @@ import torch.nn as nn
 from torch import Tensor
 
 
+class GaussianRBF(nn.Module):
+    """Gaussian radial basis functions with evenly spaced centers."""
+
+    def __init__(self, num_rbf: int = 20, cutoff: float = 10.0):
+        super().__init__()
+        self.num_rbf = num_rbf
+        offsets = torch.linspace(0.0, cutoff, num_rbf)
+        self.register_buffer("offsets", offsets)
+        self.width = (offsets[1] - offsets[0]).item() if num_rbf > 1 else 1.0
+
+    def forward(self, distances: Tensor) -> Tensor:
+        """Expand distances into Gaussian basis.
+
+        Args:
+            distances: Arbitrary shape.
+
+        Returns:
+            RBF features, shape (*distances.shape, num_rbf).
+        """
+        return torch.exp(
+            -0.5 * ((distances.unsqueeze(-1) - self.offsets) / self.width) ** 2
+        )
+
+
 class SinusoidalTimestepEmbedding(nn.Module):
     """Sinusoidal positional encoding for scalar timesteps."""
 

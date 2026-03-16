@@ -25,7 +25,7 @@ def main():
     x_train = x_train - box_size / 2
 
     # Create model
-    model = EquivGNNVelocityNetwork(hidden_dim=64, n_layers=3, cutoff=box_size * 1.5).to(device)
+    model = EquivGNNVelocityNetwork(hidden_dim=64, num_layers=3, cutoff=box_size * 1.5).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}")
 

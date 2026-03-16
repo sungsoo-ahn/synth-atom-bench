@@ -10,22 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from models.common import AtomOrderingEmbedding, SinusoidalTimestepEmbedding
-
-
-class GaussianRBF(nn.Module):
-    """Gaussian radial basis functions for distance expansion."""
-
-    def __init__(self, n_rbf: int = 64, cutoff: float = 10.0):
-        super().__init__()
-        offsets = torch.linspace(0.0, cutoff, n_rbf)
-        self.register_buffer("offsets", offsets)
-        self.width = (offsets[1] - offsets[0]).item() if n_rbf > 1 else 1.0
-
-    def forward(self, distances: Tensor) -> Tensor:
-        return torch.exp(
-            -0.5 * ((distances.unsqueeze(-1) - self.offsets) / self.width) ** 2
-        )
+from models.common import AtomOrderingEmbedding, GaussianRBF, SinusoidalTimestepEmbedding
 
 
 def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:

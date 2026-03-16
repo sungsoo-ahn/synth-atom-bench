@@ -109,16 +109,19 @@ class Logger:
         radius: float,
         box_size: float,
         step: int,
+        extra_metrics: dict | None = None,
     ) -> None:
         if self._log_dir is None:
             return
 
-        import numpy as np
         from data.validate import pair_correlation
         from metrics.clash_rate import clash_rate_batched
 
         cr = clash_rate_batched(positions, radius)
         metrics: dict = {"step": step, "eval/clash_rate": cr}
+        if extra_metrics:
+            for k, v in extra_metrics.items():
+                metrics[f"eval/{k}"] = v
 
         pos_np = positions.cpu().numpy()
         r, g_r = pair_correlation(pos_np, box_size)

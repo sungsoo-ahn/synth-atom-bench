@@ -318,15 +318,17 @@ def main(cfg: DictConfig) -> None:
         if step % cfg.eval.every_n_steps == 0:
             ev = evaluate(model, dataset, cfg, device, task, gt_r, gt_g_r)
             total_flops = flops_per_step * step
-            logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step)
+            # Collect metrics (everything except samples tensor)
+            ckpt_kwargs = {k: v for k, v in ev.items() if k != "samples"}
+            extra_metrics = {k: v for k, v in ckpt_kwargs.items()
+                            if k not in ("clash_rate", "gr_distance")}
+            logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step,
+                            extra_metrics=extra_metrics or None)
 
             # Log all metrics
             log_metrics = {"train/total_flops": total_flops}
-            ckpt_kwargs = {}
-            for k, v in ev.items():
-                if k != "samples":
-                    log_metrics[f"eval/{k}"] = v
-                    ckpt_kwargs[k] = v
+            for k, v in ckpt_kwargs.items():
+                log_metrics[f"eval/{k}"] = v
             logger.log_train(log_metrics, step=step)
 
             # Save checkpoint (clash_rate and gr_distance are positional, rest are kwargs)
@@ -347,11 +349,11 @@ def main(cfg: DictConfig) -> None:
     # Final evaluation
     print("\nFinal evaluation...")
     ev = evaluate(model, dataset, cfg, device, task, gt_r, gt_g_r)
-    logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step)
-    ckpt_kwargs = {}
-    for k, v in ev.items():
-        if k != "samples":
-            ckpt_kwargs[k] = v
+    ckpt_kwargs = {k: v for k, v in ev.items() if k != "samples"}
+    extra_metrics = {k: v for k, v in ckpt_kwargs.items()
+                    if k not in ("clash_rate", "gr_distance")}
+    logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step,
+                    extra_metrics=extra_metrics or None)
     cr = ckpt_kwargs.pop("clash_rate")
     grd = ckpt_kwargs.pop("gr_distance")
     ckpt_mgr.save(model, optimizer, epoch=0, step=step,

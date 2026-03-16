@@ -34,11 +34,9 @@ MCMC (Metropolis-Hastings) sampler:
 3. Collect samples after burn-in, thin to reduce autocorrelation
 4. Save as .npz with positions (N×3), radius r, box size L
 
-Generate 50k train / 5k val / 10k test samples for each setting:
-- N=10, η=0.1 (easy)
-- N=10, η=0.3 (medium)
-- N=50, η=0.3 (medium-large)
-- N=10, η=0.5 (hard)
+Generate 50k train / 5k val / 10k test samples for each setting (η fixed at 0.3):
+- N=10 (hard_sphere_N10)
+- N=50 (hard_sphere_N50)
 
 ## Generative Framework
 
@@ -220,7 +218,7 @@ All generated artifacts go under `outputs/`, never mixed with source code:
 
 ```
 outputs/
-├── data/{N}_{eta}/          # Generated .npz datasets (e.g. N10_eta0.1/)
+├── data/{task}_{N}/         # Generated .npz datasets (e.g. hard_sphere_N10/, chain_N10/)
 ├── plots/                   # All visualizations and figures
 ├── checkpoints/{arch}/      # Model weights (gnn/, transformer/, pairformer/)
 ├── logs/{arch}/             # Training logs
@@ -231,7 +229,7 @@ outputs/
 
 Rules:
 - **Never write files to source directories** (`data/`, `metrics/`, `models/`, etc.). All outputs (data, plots, checkpoints, logs) go under `outputs/`.
-- **Always use `--output` flags** pointing into `outputs/` when running scripts. Example: `python data/generate.py --output outputs/data/N10_eta0.1/train.npz`
+- **Always use `--output` flags** pointing into `outputs/` when running scripts. Example: `python data/generate.py --output outputs/data/hard_sphere_N10/train.npz`
 - **Clean up after test/debug runs.** If you generate temporary files for testing (e.g. small sample counts, scratch plots), delete them when done. Do not leave behind files named `test_*`, `tmp_*`, `debug_*`, or similar in `outputs/`.
 - **No stale checkpoints.** When a training run is superseded or was a failed experiment, remove its checkpoint directory rather than leaving dead weights around.
 - **Name files descriptively.** Use the pattern `{split}_{setting}.npz` for data (e.g. `train.npz`, `val.npz`, `test.npz`) and `{description}.png` for plots. Never use generic names like `output.npz` or `plot.png`.

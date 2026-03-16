@@ -1,5 +1,5 @@
 defaults:
-  - data: medium_small
+  - data: hard_sphere_N10
   - model: equiv_gnn
   - logging: logging
   - _self_

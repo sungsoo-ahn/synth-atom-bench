@@ -722,7 +722,7 @@ def main():
     common.add_argument("--budgets", default=None, help="Comma-separated FLOP budgets")
     common.add_argument("--batch_size", type=int, default=256, help="Batch size for FLOPs measurement")
     common.add_argument("--n_atoms", type=int, default=10, help="Number of atoms (auto-detected if --data set)")
-    common.add_argument("--data", default=None, help="Hydra data config name (e.g. medium_large)")
+    common.add_argument("--data", default=None, help="Hydra data config name (e.g. hard_sphere_N10)")
     common.add_argument("--n_gpus", type=int, default=1, help="Number of GPUs for parallel execution")
 
     # Subcommands

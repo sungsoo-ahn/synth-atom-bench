@@ -77,14 +77,14 @@ uv sync
 
 # Generate training data (hard spheres: N=10, η=0.3)
 uv run data/generate.py --N 10 --eta 0.3 --radius 0.5 \
-    --num_samples 50000 --output outputs/data/N10_eta0.3/train.npz
+    --num_samples 50000 --output outputs/data/hard_sphere_N10/train.npz
 
 # Generate training data (chains: N=20)
 uv run data/generate_chains.py --N 20 --num_samples 50000 \
     --output outputs/data/chain_N20/train.npz
 
-# Train a PaiNN model
-uv run experiments/train.py model=painn data=default training.max_steps=50000
+# Train an Equiv-GNN model
+uv run experiments/train.py model=equiv_gnn data=hard_sphere_N10 train.max_steps=50000
 
 # Evaluate (generate samples + compute clash rate)
 uv run experiments/evaluate.py --checkpoint outputs/checkpoints/painn/best.pt \

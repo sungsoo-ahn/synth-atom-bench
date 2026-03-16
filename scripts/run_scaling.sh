@@ -2,7 +2,7 @@
 # Run the full scaling law experiment pipeline.
 set -euo pipefail
 
-DATA_DIR="outputs/data/N10_eta0.3"
+DATA_DIR="outputs/data/hard_sphere_N10"
 SCALING_DIR="${1:-outputs/scaling}"
 
 # Generate training data if not present

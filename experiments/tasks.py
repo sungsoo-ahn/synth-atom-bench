@@ -49,7 +49,7 @@ class HardSphereTask(Task):
         return {}
 
     def run_name(self, cfg, n_atoms):
-        return f"{cfg.model.arch}_N{n_atoms}_eta{cfg.data.eta}"
+        return f"{cfg.model.arch}_N{n_atoms}_hard_sphere"
 
     def describe_data(self, dataset):
         N = dataset.positions.shape[1]

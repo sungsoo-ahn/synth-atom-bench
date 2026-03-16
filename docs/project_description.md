@@ -38,14 +38,14 @@ This is the simplest possible 3D structure problem: the *only* challenge is avoi
 
 **Why this task first?** Future SynthBench tasks will isolate other challenges (bond constraints, symmetry, multimodality, long-range dependencies). Together they form a diagnostic suite that decomposes what makes 3D structure prediction hard. Hard sphere packing is the baseline.
 
-### Difficulty settings
+### Hard sphere settings
 
-| Setting | N | $\eta$ | Difficulty |
-|---------|---|--------|------------|
-| `easy_small` | 10 | 0.1 | Easy |
-| `medium_small` | 10 | 0.3 | Medium |
-| `medium_large` | 50 | 0.3 | Medium-large |
-| `hard_small` | 10 | 0.5 | Hard |
+Packing fraction η is fixed at 0.3. Difficulty scales with N (number of atoms).
+
+| Setting | N | $\eta$ |
+|---------|---|--------|
+| `hard_sphere_N10` | 10 | 0.3 |
+| `hard_sphere_N50` | 50 | 0.3 |
 
 Each setting has 50k train / 5k val / 10k test samples generated via MCMC (Metropolis-Hastings) with burn-in and thinning. All atoms have radius r = 0.5.
 
@@ -162,10 +162,10 @@ synth-atom-bench/
 
 ```bash
 # Generate data
-uv run data/generate.py --N 10 --eta 0.3 --num-samples 50000 --output outputs/data/N10_eta0.3/train.npz
+uv run data/generate.py --N 10 --eta 0.3 --num-samples 50000 --output outputs/data/hard_sphere_N10/train.npz
 
 # Train a model
-uv run experiments/train.py model=painn data=medium_small
+uv run experiments/train.py model=equiv_gnn data=hard_sphere_N10
 
 # Run scaling experiments
 uv run experiments/scaling.py generate    # measure FLOPs, print commands

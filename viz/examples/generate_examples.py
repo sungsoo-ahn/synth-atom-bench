@@ -20,7 +20,7 @@ OUT_DIR = _project_root / "outputs" / "plots" / "examples"
 
 
 def _load_test_data():
-    path = _project_root / "outputs" / "data" / "N10_eta0.1" / "test_easy.npz"
+    path = _project_root / "outputs" / "data" / "hard_sphere_N10" / "train.npz"
     data = np.load(path)
     return data["positions"], float(data["radius"]), float(data["box_size"])
 

@@ -2,7 +2,7 @@
 # Run hyperparameter sweep using Hydra multirun with joblib launcher (8 GPUs).
 set -euo pipefail
 
-DATA_DIR="outputs/data/N10_eta0.3"
+DATA_DIR="outputs/data/hard_sphere_N10"
 SWEEP_DIR="${1:-outputs/sweep}"
 MAX_STEPS="${2:-100000}"
 

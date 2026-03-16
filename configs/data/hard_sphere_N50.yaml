@@ -1,5 +1,5 @@
 task: hard_sphere
-data_dir: outputs/data/N50_eta0.3
+data_dir: outputs/data/hard_sphere_N50
 n_atoms: 50
 eta: 0.3
 radius: 0.5

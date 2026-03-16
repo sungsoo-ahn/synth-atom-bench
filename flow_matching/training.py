@@ -19,7 +19,7 @@ def flow_matching_loss(model: nn.Module, x_0: Tensor) -> Tensor:
         Scalar MSE loss.
     """
     batch_size = x_0.shape[0]
-    t = torch.rand(batch_size, device=x_0.device)
+    t = torch.sigmoid(torch.randn(batch_size, device=x_0.device))
     x_t, noise, velocity_target = interpolate(x_0, t)
     v_pred = model(x_t, t)
     return F.mse_loss(v_pred, velocity_target)

@@ -142,7 +142,7 @@ clash_rate(C) = a × C^(-α) + floor      (C = total training FLOPs)
 │   ├── sweep.yaml
 │   ├── data/
 │   ├── model/
-│   │   ├── painn.yaml
+│   │   ├── equiv_gnn.yaml
 │   │   ├── transformer.yaml
 │   │   └── pairformer.yaml
 │   └── logging/
@@ -151,10 +151,10 @@ clash_rate(C) = a × C^(-α) + floor      (C = total training FLOPs)
 │   ├── dataset.py              # PyTorch dataset
 │   └── validate.py             # Check g(r) of generated data
 ├── models/
-│   ├── painn.py                # PaiNN velocity network from SchNetPack
+│   ├── equiv_gnn.py            # Equivariant GNN velocity network (PaiNN-based)
 │   ├── transformer.py          # Transformer velocity network from SimpleFold
 │   ├── pairformer.py           # Pairformer velocity network from Boltz
-│   └── common.py               # Shared: timestep embedding
+│   └── common.py               # Shared: timestep embedding, atom ordering
 ├── flow_matching/
 │   ├── interpolation.py
 │   ├── training.py
@@ -166,7 +166,6 @@ clash_rate(C) = a × C^(-α) + floor      (C = total training FLOPs)
 │   ├── structure.py            # 3D atom structure plots
 │   ├── metrics.py              # g(r) and min distance histogram
 │   ├── scaling.py              # Scaling curves and capability heatmap
-│   ├── training.py             # Training loss/clash rate curves
 │   └── examples/
 │       └── generate_examples.py  # Visual QA script
 ├── experiments/
@@ -175,6 +174,7 @@ clash_rate(C) = a × C^(-α) + floor      (C = total training FLOPs)
 │   ├── scaling.py              # Compute-matched scaling sweep
 │   ├── sweep_hparams.py        # Hyperparameter sweep orchestrator
 │   ├── model_registry.py       # Shared model registry and size presets
+│   ├── tasks.py                # Task abstraction (hard_sphere, chain)
 │   ├── logger.py               # File-based logging (JSONL)
 │   └── checkpointing.py        # Checkpoint management
 ├── scripts/
@@ -194,7 +194,7 @@ clash_rate(C) = a × C^(-α) + floor      (C = total training FLOPs)
 2. `data/dataset.py` — PyTorch dataset loading .npz files
 3. `metrics/clash_rate.py` — GPU-accelerated clash rate computation
 4. `flow_matching/` — shared interpolation, loss, ODE sampler
-5. `models/gnn.py` — reimplement SchNetPack PaiNN as velocity network
+5. `models/equiv_gnn.py` — reimplement SchNetPack PaiNN as velocity network
 6. `models/transformer.py` — reimplement SimpleFold transformer blocks as velocity network
 7. `models/pairformer.py` — reimplement Boltz PairformerStack as velocity network
 8. `experiments/train.py` — training loop with Hydra configs

@@ -36,11 +36,11 @@ For each architecture, we sweep model size and training steps under a fixed comp
   <img src="docs/assets/scaling_curves.png" width="65%" alt="Hard sphere compute scaling curves">
 </p>
 
-| | PaiNN | Transformer | Pairformer |
+| | Equiv-GNN | Transformer | Pairformer |
 |---|:---:|:---:|:---:|
 | **α** (clash rate) | **1.21** | 0.39 | 0.51 |
 
-PaiNN scales fastest on hard spheres, reaching 0% clash rate at just 2×10^16 FLOPs. Its equivariant message passing is the right inductive bias for learning pairwise distance constraints.
+Equiv-GNN scales fastest on hard spheres, reaching 0% clash rate at just 2×10^16 FLOPs. Its equivariant message passing is the right inductive bias for learning pairwise distance constraints.
 
 ### Self-Avoiding Chains
 
@@ -48,7 +48,7 @@ PaiNN scales fastest on hard spheres, reaching 0% clash rate at just 2×10^16 FL
   <img src="docs/assets/chain_scaling_gr_distance.png" width="65%" alt="Chain g(r) distance compute scaling curves">
 </p>
 
-| | PaiNN | Transformer | Pairformer |
+| | Equiv-GNN | Transformer | Pairformer |
 |---|:---:|:---:|:---:|
 | **α** (g(r) distance) | 0.15 | 0.38 | **0.89** |
 | **α** (clash rate) | 0.19 | 0.24 | **0.90** |
@@ -57,13 +57,13 @@ On chains, Pairformer dominates — its pair representation and triangular updat
 
 ### Takeaway
 
-Architecture rankings flip between tasks. PaiNN's equivariance helps most on the pure distance-constraint problem (hard spheres), while Pairformer's richer pair representations dominate when structure has sequential topology (chains). This is exactly the kind of insight synthetic benchmarks are designed to reveal — **the "best" architecture depends on what geometric challenge dominates your problem.**
+Architecture rankings flip between tasks. Equiv-GNN's equivariance helps most on the pure distance-constraint problem (hard spheres), while Pairformer's richer pair representations dominate when structure has sequential topology (chains). This is exactly the kind of insight synthetic benchmarks are designed to reveal — **the "best" architecture depends on what geometric challenge dominates your problem.**
 
 ## Architectures
 
 | Architecture | Type | Equivariant? | Reference |
 |---|---|---|---|
-| **PaiNN** | Equivariant GNN | Yes | [Schütt et al., 2021](https://arxiv.org/abs/2102.03150) |
+| **Equiv-GNN (PaiNN)** | Equivariant GNN | Yes | [Schütt et al., 2021](https://arxiv.org/abs/2102.03150) |
 | **Transformer** | Global attention | No (augmentation) | [SimpleFold (Apple, 2025)](https://arxiv.org/abs/2503.11533) |
 | **Pairformer** | Pair + triangle updates | No (augmentation) | [Boltz (Wohlwend et al., 2024)](https://arxiv.org/abs/2408.00778) |
 
@@ -87,11 +87,11 @@ uv run data/generate_chains.py --N 20 --num_samples 50000 \
 uv run experiments/train.py model=equiv_gnn data=hard_sphere_N10 train.max_steps=50000
 
 # Evaluate (generate samples + compute clash rate)
-uv run experiments/evaluate.py --checkpoint outputs/checkpoints/painn/best.pt \
-    --arch painn --num_samples 10000
+uv run experiments/evaluate.py --checkpoint outputs/checkpoints/equiv_gnn/best.pt \
+    --arch equiv_gnn --num_samples 10000
 
 # Run compute-matched scaling experiment
-uv run experiments/scaling.py run --arch painn --budgets 1e15 4e15 1.6e16
+uv run experiments/scaling.py run --arch equiv_gnn --budgets 1e15 4e15 1.6e16
 ```
 
 > Regenerate README figures: `uv run docs/assets/generate_readme_figures.py`
@@ -100,7 +100,7 @@ uv run experiments/scaling.py run --arch painn --budgets 1e15 4e15 1.6e16
 
 ```
 ├── data/               # MCMC samplers + PyTorch dataset
-├── models/             # PaiNN, Transformer, Pairformer velocity networks
+├── models/             # Equiv-GNN, Transformer, Pairformer velocity networks
 ├── flow_matching/      # Shared interpolation, training loss, ODE sampling
 ├── metrics/            # Clash rate, bond violation, g(r) distance
 ├── experiments/        # Training, evaluation, scaling sweeps
@@ -116,4 +116,4 @@ uv run experiments/scaling.py run --arch painn --budgets 1e15 4e15 1.6e16
 
 ## Tech Stack
 
-Python · PyTorch · Hydra · W&B · uv
+Python · PyTorch · Hydra · uv

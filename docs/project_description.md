@@ -156,7 +156,7 @@ synth-atom-bench/
 - **Fair comparison by construction:** Same flow matching, same sampler, same data, same augmentation. Only the velocity network varies.
 - **Compute accounting:** FLOPs measured with torch profiler. Total training FLOPs (not GPU-hours) is the x-axis.
 - **Faithful reimplementations:** PaiNN from SchNetPack, Transformer from SimpleFold, Pairformer from Boltz — reimplemented from source, not imported as dependencies.
-- **Reproducibility:** Deterministic seeds, checkpointing with resume, Hydra configs for all hyperparameters, W&B logging.
+- **Reproducibility:** Deterministic seeds, checkpointing with resume, Hydra configs for all hyperparameters, file-based JSONL logging.
 
 ### Running experiments
 

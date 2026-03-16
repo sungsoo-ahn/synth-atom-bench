@@ -22,4 +22,6 @@ def flow_matching_loss(model: nn.Module, x_0: Tensor) -> Tensor:
     t = torch.sigmoid(torch.randn(batch_size, device=x_0.device))
     x_t, noise, velocity_target = interpolate(x_0, t)
     v_pred = model(x_t, t)
-    return F.mse_loss(v_pred, velocity_target)
+    weight = (t / (1 - t + 1e-5)) ** 2
+    loss = (weight[:, None, None] * (v_pred - velocity_target) ** 2).mean()
+    return loss

@@ -224,6 +224,9 @@ class EquivGNNVelocityNetwork(nn.Module):
             EquivGNNMixing(hidden_dim) for _ in range(num_layers)
         ])
 
+        # Position-to-vector projection: scalar gate for initial vector features
+        self.pos_to_vec = nn.Linear(hidden_dim, hidden_dim)
+
         # Velocity readout from vector features: (n_atoms, 3, H) -> (n_atoms, 3)
         self.velocity_readout = nn.Linear(hidden_dim, 1, bias=False)
 
@@ -302,8 +305,11 @@ class EquivGNNVelocityNetwork(nn.Module):
             ord_emb = ord_emb.unsqueeze(0).expand(batch_size, -1, -1).reshape(batch_size * N, -1)
             s = s + ord_emb
 
-        # Initialize vector features: zeros
-        v = torch.zeros(batch_size * N, 3, self.hidden_dim, device=positions.device)
+        # Initialize vector features from input positions
+        # positions_flat: (batch*N, 3) -> (batch*N, 3, 1) * gate -> (batch*N, 3, H)
+        pos_flat = positions.reshape(batch_size * N, 3)
+        gate = self.pos_to_vec(s)  # (batch*N, H) — scalar-gated projection
+        v = pos_flat[:, :, None] * gate[:, None, :]  # (batch*N, 3, H)
 
         # Message passing
         for interaction, mixing in zip(self.interactions, self.mixings):

@@ -33,6 +33,10 @@ class Task(ABC):
     def describe_data(self, dataset) -> str:
         """Return a human-readable description of the dataset."""
 
+    @abstractmethod
+    def data_generator_cmd(self, n_atoms: int, n_samples: int, output_path: str) -> str:
+        """Return shell command to generate data for this task."""
+
 
 class HardSphereTask(Task):
     def __init__(self, eta: float | None = None):
@@ -54,6 +58,13 @@ class HardSphereTask(Task):
     def describe_data(self, dataset):
         N = dataset.positions.shape[1]
         return f"hard-sphere, N={N}, radius={dataset.radius}, box_size={dataset.box_size:.4f}"
+
+    def data_generator_cmd(self, n_atoms: int, n_samples: int, output_path: str) -> str:
+        eta = self.eta or 0.3
+        return (
+            f"uv run python data/generate.py --N {n_atoms} --eta {eta} "
+            f"--num_samples {n_samples} --output {output_path}"
+        )
 
 
 class ChainTask(Task):
@@ -84,6 +95,12 @@ class ChainTask(Task):
     def describe_data(self, dataset):
         N = dataset.positions.shape[1]
         return f"chain, N={N}, bond_length={dataset.bond_length}, radius={dataset.radius}, box_size={dataset.box_size:.4f}"
+
+    def data_generator_cmd(self, n_atoms: int, n_samples: int, output_path: str) -> str:
+        return (
+            f"uv run python data/generate_chains.py --N {n_atoms} "
+            f"--num_samples {n_samples} --output {output_path}"
+        )
 
 
 TASK_REGISTRY = {

@@ -243,3 +243,19 @@ Rules:
 - FLOPs measured with torch profiler for fair compute matching — total training FLOPs (not GPU-hours) is the x-axis for all scaling curves
 - Use established reference implementations (SchNetPack, SimpleFold, Boltz) — reimplement faithfully based on their code rather than importing as dependencies, adding only timestep embedding + output projection
 - All visualization uses the `viz/` package with `synthbench_style()` context manager for consistent publication-quality plots
+
+## Autoresearch Mode
+
+For autonomous algorithm improvement sessions, start with the master program:
+- **Start here:** `autoresearch/program.md` — two-phase cycle overview
+- Flow matching improvements: `autoresearch/program_flow.md`
+- Architecture improvements: `autoresearch/program_arch.md`
+
+Run `uv run python autoresearch/baseline.py --data hard_sphere_N50` first to establish baseline.
+
+## Automated Scaling
+
+For fully automated scaling law experiments:
+```bash
+uv run python experiments/scaling_auto.py --task hard_sphere --n_atoms 50 --archs equiv_gnn,transformer,pairformer --n_gpus 8
+```

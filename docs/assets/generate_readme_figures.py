@@ -13,6 +13,8 @@ if str(_project_root) not in sys.path:
 
 import matplotlib.pyplot as plt
 
+from experiments.model_registry import ARCH_DISPLAY_NAMES
+
 from data.generate import mcmc_sample
 from data.generate_chains import mcmc_chain_sample
 from viz.scaling import plot_scaling_curves
@@ -100,7 +102,7 @@ def _load_scaling_results(results_path, metric_key="best_clash_rate"):
         raw = json.load(f)
 
     best = raw["best_per_budget"]
-    arch_name_map = {"equiv_gnn": "Equiv-GNN", "transformer": "Transformer", "pairformer": "Pairformer"}
+    arch_name_map = ARCH_DISPLAY_NAMES
     arch_data = {}
     for entry in best.values():
         if entry["total_flops"] <= 0:

@@ -11,7 +11,7 @@ from itertools import product
 import numpy as np
 import torch
 
-from experiments.model_registry import MODEL_DEFAULTS, MODEL_REGISTRY, SIZE_PRESETS
+from experiments.model_registry import ARCH_DISPLAY_NAMES, MODEL_DEFAULTS, MODEL_REGISTRY, SIZE_PRESETS
 
 BUDGETS = [1e15, 4e15, 1.6e16, 6.4e16, 2.56e17]
 LEARNING_RATES = [1e-4, 1e-3]
@@ -481,7 +481,7 @@ def fit_scaling(args):
         arch_data[arch]["nonbonded_clash_rate"] = np.array(arch_data[arch]["nonbonded_clash_rate"])[order]
 
     # Capitalize arch names for plotting (matches ARCH_COLORS keys)
-    arch_name_map = {"equiv_gnn": "Equiv-GNN", "transformer": "Transformer", "pairformer": "Pairformer"}
+    arch_name_map = ARCH_DISPLAY_NAMES
     plot_data = {}
     for arch, d in arch_data.items():
         display_name = arch_name_map.get(arch, arch)

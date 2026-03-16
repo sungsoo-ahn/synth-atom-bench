@@ -145,11 +145,25 @@ class AttentionPairBias(nn.Module):
         return out
 
 
+class AdaLNZeroModulation(nn.Module):
+    """Generates (scale, shift, gate) triples from conditioning vector."""
+
+    def __init__(self, cond_dim: int, out_dim: int, n_modulations: int = 3):
+        super().__init__()
+        self.linear = nn.Linear(cond_dim, n_modulations * out_dim)
+        nn.init.constant_(self.linear.weight, 0)
+        nn.init.constant_(self.linear.bias, 0)
+
+    def forward(self, c: Tensor) -> list[Tensor]:
+        return self.linear(c).chunk(3, dim=-1)
+
+
 class PairformerBlock(nn.Module):
-    """Single Pairformer block (PairformerNoSeqLayer variant).
+    """Single Pairformer block with adaLN-Zero timestep conditioning.
 
     Updates pair repr with triangle multiplications + transition,
     then updates single repr with pair-biased attention + transition.
+    Timestep modulates single repr updates via scale/shift/gate (adaLN-Zero).
     """
 
     def __init__(
@@ -166,12 +180,17 @@ class PairformerBlock(nn.Module):
         self.attn_pair_bias = AttentionPairBias(hidden_dim, pair_dim, num_heads)
         self.single_transition = Transition(hidden_dim, expansion_factor)
 
-    def forward(self, s: Tensor, z: Tensor) -> tuple[Tensor, Tensor]:
+        # adaLN-Zero: modulate attention output and MLP output on single repr
+        self.adaln_attn = AdaLNZeroModulation(hidden_dim, hidden_dim)
+        self.adaln_mlp = AdaLNZeroModulation(hidden_dim, hidden_dim)
+
+    def forward(self, s: Tensor, z: Tensor, t_emb: Tensor | None = None) -> tuple[Tensor, Tensor]:
         """Forward pass.
 
         Args:
             s: Single representation (B, N, hidden_dim).
             z: Pair representation (B, N, N, pair_dim).
+            t_emb: Timestep embedding (B, hidden_dim), optional for backward compat.
 
         Returns:
             Updated (s, z).
@@ -179,8 +198,21 @@ class PairformerBlock(nn.Module):
         z = z + self.tri_mul_out(z)
         z = z + self.tri_mul_in(z)
         z = z + self.pair_transition(z)
-        s = s + self.attn_pair_bias(s, z)
-        s = s + self.single_transition(s)
+
+        if t_emb is not None:
+            # adaLN-Zero on attention output
+            scale_a, shift_a, gate_a = self.adaln_attn(t_emb)  # each (B, hidden_dim)
+            attn_out = self.attn_pair_bias(s, z)
+            s = s + gate_a.unsqueeze(1).sigmoid() * ((1 + scale_a.unsqueeze(1)) * attn_out + shift_a.unsqueeze(1))
+
+            # adaLN-Zero on MLP output
+            scale_m, shift_m, gate_m = self.adaln_mlp(t_emb)
+            mlp_out = self.single_transition(s)
+            s = s + gate_m.unsqueeze(1).sigmoid() * ((1 + scale_m.unsqueeze(1)) * mlp_out + shift_m.unsqueeze(1))
+        else:
+            s = s + self.attn_pair_bias(s, z)
+            s = s + self.single_transition(s)
+
         return s, z
 
 
@@ -264,9 +296,9 @@ class PairformerVelocityNetwork(nn.Module):
         dists = torch.cdist(positions, positions)  # (B, N, N)
         z = self.pair_proj(self.rbf(dists))  # (B, N, N, pair_dim)
 
-        # Pairformer blocks
+        # Pairformer blocks with per-layer adaLN-Zero conditioning
         for block in self.blocks:
-            s, z = block(s, z)
+            s, z = block(s, z, t_emb)
 
         # Output velocity
         return self.out_proj(self.out_norm(s))

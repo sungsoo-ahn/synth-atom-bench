@@ -7,22 +7,12 @@ import sys
 import numpy as np
 import torch
 
-from data.chain_dataset import ChainDataset
-from data.dataset import HardSphereDataset
 from experiments.checkpointing import load_checkpoint
+from experiments.model_registry import MODEL_REGISTRY
+from experiments.tasks import get_task_from_data
 from flow_matching.sampling import sample_batched
-from metrics.bond_violation import bond_violation_rate_batched, nonbonded_clash_rate_batched
 from metrics.clash_rate import clash_rate_batched
 from metrics.gr_distance import gr_distance
-from models.painn import PaiNNVelocityNetwork
-from models.pairformer import PairformerVelocityNetwork
-from models.transformer import TransformerVelocityNetwork
-
-MODEL_REGISTRY = {
-    "painn": PaiNNVelocityNetwork,
-    "transformer": TransformerVelocityNetwork,
-    "pairformer": PairformerVelocityNetwork,
-}
 
 
 def build_model_from_config(config: dict, box_size: float) -> torch.nn.Module:
@@ -55,17 +45,11 @@ def main():
     arch = config["model"]["arch"]
     print(f"Architecture: {arch} | Step: {state.step} | Best clash rate: {state.best_clash_rate:.4f}")
 
-    # Load dataset for metadata (auto-detect chain vs hard-sphere)
+    # Auto-detect task and load dataset
     train_path = os.path.join(args.data, "train.npz")
-    npz = np.load(train_path)
-    is_chain = "bond_length" in npz.files
-    npz.close()
-    if is_chain:
-        dataset = ChainDataset(train_path)
-        print(f"Data: chain, N={dataset.positions.shape[1]}, bond_length={dataset.bond_length}, radius={dataset.radius}, box_size={dataset.box_size:.4f}")
-    else:
-        dataset = HardSphereDataset(train_path)
-        print(f"Data: hard-sphere, N={dataset.positions.shape[1]}, radius={dataset.radius}, box_size={dataset.box_size:.4f}")
+    task = get_task_from_data(train_path)
+    dataset = task.load_dataset(train_path)
+    print(f"Data: {task.describe_data(dataset)}")
     box_size = dataset.box_size
     radius = dataset.radius
     n_atoms = dataset.positions.shape[1]
@@ -90,29 +74,23 @@ def main():
     # Shift back to [0, box_size]
     samples = samples + box_size / 2
 
-    # Compute metrics
+    # Compute base metrics
     cr = clash_rate_batched(samples, radius)
 
-    # Ground truth g(r) for distance metric
     from data.validate import pair_correlation
     gt_pos = dataset.positions.numpy()
     gt_r, gt_g_r = pair_correlation(gt_pos, box_size)
     grd = gr_distance(samples.numpy(), gt_r, gt_g_r, box_size)
 
-    # Chain-specific metrics
-    bvr = None
-    ncr = None
-    if is_chain:
-        bvr = bond_violation_rate_batched(samples, dataset.bond_length)
-        ncr = nonbonded_clash_rate_batched(samples, radius)
+    # Task-specific metrics
+    extra_metrics = task.compute_metrics(samples, dataset)
 
     print(f"\nResults:")
     print(f"  Samples generated: {args.n_samples}")
     print(f"  Clash rate:        {cr:.4f}")
     print(f"  g(r) distance:     {grd:.4f}")
-    if is_chain:
-        print(f"  Bond violation:    {bvr:.4f}")
-        print(f"  Non-bonded clash:  {ncr:.4f}")
+    for k, v in extra_metrics.items():
+        print(f"  {k:20s} {v:.4f}")
 
     # Output directory
     output_dir = args.output or os.path.join("outputs", "eval", arch)
@@ -127,9 +105,8 @@ def main():
         gr_distance=grd,
         step=state.step,
     )
-    if is_chain:
-        save_kwargs["bond_violation_rate"] = bvr
-        save_kwargs["nonbonded_clash_rate"] = ncr
+    save_kwargs.update(extra_metrics)
+    if hasattr(dataset, "bond_length"):
         save_kwargs["bond_length"] = dataset.bond_length
     out_path = os.path.join(output_dir, "generated.npz")
     np.savez(out_path, **save_kwargs)

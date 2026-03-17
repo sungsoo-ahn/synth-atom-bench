@@ -14,6 +14,19 @@ from torch import Tensor
 from models.common import AtomOrderingEmbedding, GaussianRBF, SinusoidalTimestepEmbedding
 
 
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: Tensor) -> Tensor:
+        rms = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
+        return (x.float() * rms).to(x.dtype) * self.weight
+
+
 class TriangleMultiplication(nn.Module):
     """Triangular multiplicative update (outgoing or incoming).
 
@@ -26,12 +39,12 @@ class TriangleMultiplication(nn.Module):
         assert mode in ("outgoing", "incoming")
         self.mode = mode
 
-        self.norm_in = nn.LayerNorm(pair_dim)
+        self.norm_in = RMSNorm(pair_dim)
         self.proj_a = nn.Linear(pair_dim, pair_dim)
         self.gate_a = nn.Linear(pair_dim, pair_dim)
         self.proj_b = nn.Linear(pair_dim, pair_dim)
         self.gate_b = nn.Linear(pair_dim, pair_dim)
-        self.norm_out = nn.LayerNorm(pair_dim)
+        self.norm_out = RMSNorm(pair_dim)
         self.out_proj = nn.Linear(pair_dim, pair_dim)
         self.out_gate = nn.Linear(pair_dim, pair_dim)
 
@@ -73,7 +86,7 @@ class Transition(nn.Module):
     def __init__(self, dim: int, expansion_factor: float = 4.0):
         super().__init__()
         hidden_dim = int(2 * dim * expansion_factor / 3)
-        self.norm = nn.LayerNorm(dim)
+        self.norm = RMSNorm(dim)
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=True)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
@@ -96,8 +109,8 @@ class AttentionPairBias(nn.Module):
         self.head_dim = hidden_dim // num_heads
         self.scale = self.head_dim ** -0.5
 
-        self.norm_s = nn.LayerNorm(hidden_dim)
-        self.norm_z = nn.LayerNorm(pair_dim)
+        self.norm_s = RMSNorm(hidden_dim)
+        self.norm_z = RMSNorm(pair_dim)
 
         self.qkv = nn.Linear(hidden_dim, 3 * hidden_dim)
         self.gate_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -166,7 +179,7 @@ class OuterProductMean(nn.Module):
 
     def __init__(self, hidden_dim: int, pair_dim: int, opm_dim: int = 32):
         super().__init__()
-        self.norm = nn.LayerNorm(hidden_dim)
+        self.norm = RMSNorm(hidden_dim)
         self.linear_a = nn.Linear(hidden_dim, opm_dim)
         self.linear_b = nn.Linear(hidden_dim, opm_dim)
         self.out_proj = nn.Linear(opm_dim * opm_dim, pair_dim)
@@ -300,7 +313,7 @@ class PairformerVelocityNetwork(nn.Module):
         ])
 
         # Output: LayerNorm -> zero-init Linear -> velocity (B, N, 3)
-        self.out_norm = nn.LayerNorm(hidden_dim)
+        self.out_norm = RMSNorm(hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, 3)
         nn.init.constant_(self.out_proj.weight, 0)
         nn.init.constant_(self.out_proj.bias, 0)

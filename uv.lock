@@ -11,6 +11,22 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "adjusttext"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/d4/6585f3b6fdb75648bca294664af4becc8aa2fb3fb08f4e4e9fd27e10d773/adjusttext-1.3.0.tar.gz", hash = "sha256:4ab75cd4453af4828876ac3e964f2c49be642ea834f0c1f7449558d5f12cbca1", size = 15724, upload-time = "2024-10-31T16:45:36.101Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/1c/8feedd607cc14c5df9aef74fe3af9a99bf660743b842a9b5b1865326b4aa/adjustText-1.3.0-py3-none-any.whl", hash = "sha256:da23d7b24b6db5ffa039bb136bfa556207365e32f48ac74b07ad26dd485bc691", size = 13154, upload-time = "2024-10-31T16:45:35.227Z" },
+]
+
+[[package]]
 name = "antlr4-python3-runtime"
 version = "4.9.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1365,6 +1381,7 @@ name = "synthbench3d"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "adjusttext" },
     { name = "hydra-core" },
     { name = "hydra-joblib-launcher" },
     { name = "matplotlib" },
@@ -1388,6 +1405,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "adjusttext", specifier = ">=1.3.0" },
     { name = "hydra-core", specifier = ">=1.3" },
     { name = "hydra-joblib-launcher", specifier = ">=1.2" },
     { name = "matplotlib", specifier = ">=3.5" },

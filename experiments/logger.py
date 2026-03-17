@@ -110,6 +110,7 @@ class Logger:
         box_size: float,
         step: int,
         extra_metrics: dict | None = None,
+        clash_rate: float | None = None,
     ) -> None:
         if self._log_dir is None:
             return
@@ -117,7 +118,7 @@ class Logger:
         from data.validate import pair_correlation
         from metrics.clash_rate import clash_rate_batched
 
-        cr = clash_rate_batched(positions, radius)
+        cr = clash_rate if clash_rate is not None else clash_rate_batched(positions, radius)
         metrics: dict = {"step": step, "eval/clash_rate": cr}
         if extra_metrics:
             for k, v in extra_metrics.items():

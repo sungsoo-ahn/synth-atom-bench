@@ -15,7 +15,7 @@ from metrics.clash_rate import clash_rate_batched
 from metrics.gr_distance import gr_distance
 
 
-def build_model_from_config(config: dict, box_size: float) -> torch.nn.Module:
+def build_model_from_config(config: dict, box_size: float, task=None) -> torch.nn.Module:
     """Reconstruct model from saved config dict."""
     arch = config["model"]["arch"]
     if arch not in MODEL_REGISTRY:
@@ -23,6 +23,10 @@ def build_model_from_config(config: dict, box_size: float) -> torch.nn.Module:
     kwargs = dict(config["model"]["model_kwargs"])
     if "cutoff" in kwargs:
         kwargs["cutoff"] = box_size * 1.5
+    # Inject task-specific kwargs (e.g. atom_ordering) if not already in saved config
+    if task is not None:
+        for k, v in task.model_kwargs().items():
+            kwargs.setdefault(k, v)
     return MODEL_REGISTRY[arch](**kwargs)
 
 
@@ -55,7 +59,7 @@ def main():
     n_atoms = dataset.positions.shape[1]
 
     # Build and load model
-    model = build_model_from_config(config, box_size).to(device)
+    model = build_model_from_config(config, box_size, task=task).to(device)
     model.load_state_dict(state.model_state_dict)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {n_params:,}")

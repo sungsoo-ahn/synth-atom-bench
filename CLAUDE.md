@@ -246,12 +246,13 @@ Rules:
 
 ## Autoresearch Mode
 
-For autonomous algorithm improvement sessions, start with the master program:
-- **Start here:** `autoresearch/program.md` — two-phase cycle overview
-- Flow matching improvements: `autoresearch/program_flow.md`
-- Architecture improvements: `autoresearch/program_arch.md`
+For autonomous algorithm improvement sessions:
+- **Start here:** `autoresearch/program.md` — strategy overview (cyclic per-arch optimization, 24 trials each)
+- **Session guide:** `autoresearch/program_session.md` — detailed workflow and seeded ideas
 
-Run `uv run python autoresearch/baseline.py --data hard_sphere_N50` first to establish baseline.
+Each session optimizes one architecture at a time, editing both `models/{arch}.py` and `flow_matching/*.py` together. When switching to the next architecture, the flow matching state carries over as a warm start.
+
+Run `uv run python autoresearch/baseline.py --data chain_N50` first to establish baseline.
 
 ## Automated Scaling
 

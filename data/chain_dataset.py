@@ -14,6 +14,13 @@ class ChainDataset(Dataset):
 
     def __init__(self, path: str):
         data = np.load(path)
+        required = {"positions", "box_size", "radius", "bond_length"}
+        missing = required - set(data.files)
+        if missing:
+            raise ValueError(
+                f"Chain dataset {path} is missing required fields: {missing}. "
+                f"Available: {data.files}"
+            )
         positions = data["positions"].astype(np.float32)
         self.box_size = float(data["box_size"])
         self.radius = float(data["radius"])

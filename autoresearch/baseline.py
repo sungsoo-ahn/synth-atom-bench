@@ -11,14 +11,20 @@ from data.validate import pair_correlation
 from metrics.gr_distance import gr_distance
 
 
-def compute_oracle_gr_distance(data_path: str, num_bins: int = 200) -> dict:
+def compute_oracle_gr_distance(
+    data_path: str, num_bins: int = 200, eval_samples: int | None = None,
+) -> dict:
     """Split training data in half, compute g(r) distance between halves.
 
-    This is the theoretical best any generator can achieve — the noise floor
-    from finite sample statistics.
+    This measures the noise floor of the g(r) metric given finite samples.
+
+    Args:
+        eval_samples: If set, subsample the "generated" half to this count
+            to match the evaluation sample size. This makes the oracle a fair
+            lower bound for the harness evaluation (#6).
 
     Returns:
-        Dict with keys: gr_distance, n_samples, box_size, radius
+        Dict with keys: gr_distance, n_samples, n_reference, n_generated, box_size, radius
     """
     data = np.load(data_path)
     positions = data["positions"]
@@ -28,17 +34,26 @@ def compute_oracle_gr_distance(data_path: str, num_bins: int = 200) -> dict:
 
     # Split in half
     mid = n_samples // 2
-    half_a = positions[:mid]
-    half_b = positions[mid : mid + mid]  # equal sizes
+    half_a = positions[:mid]  # reference (like full training set for g(r))
+    half_b = positions[mid : mid + mid]
 
-    # Compute g(r) on each half
+    # Subsample half_b to match eval sample count if specified
+    n_generated = len(half_b)
+    if eval_samples is not None and eval_samples < len(half_b):
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(half_b), eval_samples, replace=False)
+        half_b = half_b[idx]
+        n_generated = eval_samples
+
+    # Compute g(r) on reference half, measure distance using "generated" half
     r_a, g_r_a = pair_correlation(half_a, box_size, num_bins=num_bins)
     grd = gr_distance(half_b, r_a, g_r_a, box_size, num_bins=num_bins)
 
     return {
         "gr_distance": round(grd, 6),
         "n_samples": n_samples,
-        "n_per_half": mid,
+        "n_reference": mid,
+        "n_generated": n_generated,
         "box_size": box_size,
         "radius": radius,
     }
@@ -48,6 +63,8 @@ def main():
     parser = argparse.ArgumentParser(description="Compute oracle g(r) distance baseline")
     parser.add_argument("--data", required=True, help="Data config name (e.g. hard_sphere_N50)")
     parser.add_argument("--num_bins", type=int, default=200)
+    parser.add_argument("--eval_samples", type=int, default=2000,
+                        help="Subsample size to match evaluation (default: 2000)")
     args = parser.parse_args()
 
     import yaml
@@ -65,9 +82,11 @@ def main():
         sys.exit(1)
 
     print(f"Computing oracle baseline for {args.data}...", file=sys.stderr)
-    result = compute_oracle_gr_distance(data_path, num_bins=args.num_bins)
+    result = compute_oracle_gr_distance(
+        data_path, num_bins=args.num_bins, eval_samples=args.eval_samples,
+    )
     print(f"  Oracle g(r) distance: {result['gr_distance']}", file=sys.stderr)
-    print(f"  Using {result['n_per_half']} samples per half", file=sys.stderr)
+    print(f"  Reference samples: {result['n_reference']}, generated samples: {result['n_generated']}", file=sys.stderr)
 
     # Cache result
     cache_dir = "outputs/autoresearch"

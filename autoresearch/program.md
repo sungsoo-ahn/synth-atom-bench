@@ -1,92 +1,93 @@
 # Autoresearch Master Program
 
-## Two-Phase Improvement Cycle
+## Strategy: Cyclic Per-Architecture Optimization
 
-Each autoresearch session alternates between two phases. This structure exists because **flow matching changes depend on all architectures** (they're shared infrastructure), while **architecture changes are independent** (each model file is self-contained).
-
-### Phase 1: Architecture Improvements
-
-Improve each architecture independently. Since the three model files don't interact, you can work on them in any order (or even in parallel across separate sessions).
-
-- **Editable:** `models/{arch}.py` (one at a time)
-- **Frozen:** `flow_matching/`, `experiments/`, everything else
-- **Test command:** `uv run python autoresearch/run.py --archs <arch> --data hard_sphere_N50 --n_gpus 8`
-- **Accept criterion:** aggregate g(r) distance improves for that single architecture
-- **Instructions:** See `autoresearch/program_arch.md`
-
-**Why architecture first?** Flow matching changes are tested against all three architectures. If you improve the architectures first, then the flow matching tests run on stronger models — this gives flow matching changes a fairer evaluation and lets improvements compound.
-
-### Phase 2: Flow Matching Improvements
-
-Improve the shared flow matching framework. Since this code is used by all architectures, changes must help across the board.
-
-- **Editable:** `flow_matching/*.py`
-- **Frozen:** `models/`, `experiments/`, everything else
-- **Test command:** `uv run python autoresearch/run.py --archs all --data hard_sphere_N50 --n_gpus 8`
-- **Accept criterion:** `all_archs_improved` is true — every architecture must benefit
-- **Instructions:** See `autoresearch/program_flow.md`
-
-**Why test all architectures?** A flow matching change that helps Transformers but hurts GNNs isn't a framework improvement — it's an architecture-specific interaction. Requiring all-arch improvement ensures we only keep changes that are genuinely better for the framework.
-
-## Session Structure
-
-A typical session runs one or more cycles:
+Optimize one architecture at a time, cycling through all three with a **fixed trial budget per architecture per cycle**. Each architecture gets 24 trials per cycle, then you rotate to the next. When switching architectures, the current flow matching state carries over as a warm start.
 
 ```
-Cycle N:
-  Phase 1 — Architecture
-    1a. Pick an architecture (e.g. transformer)
-    1b. Read program_arch.md + experiment log
-    1c. Iterate: hypothesize → implement → test → accept/revert
-    1d. Repeat 1c for 3-5 iterations
-    1e. Optionally switch to another architecture and repeat 1a-1d
+Cycle 1:
+  Transformer   — 24 trials (edit models/transformer.py + flow_matching/*.py)
+  Equiv-GNN     — 24 trials (edit models/equiv_gnn.py + flow_matching/*.py, warm start)
+  Pairformer    — 24 trials (edit models/pairformer.py + flow_matching/*.py, warm start)
 
-  Phase 2 — Flow Matching
-    2a. Read program_flow.md + experiment log
-    2b. Iterate: hypothesize → implement → test (--archs all) → accept/revert
-    2c. Repeat 2b for 3-5 iterations
+Cycle 2:
+  Transformer   — 24 trials (warm start from Pairformer's FM)
+  Equiv-GNN     — 24 trials
+  Pairformer    — 24 trials
 
-  Repeat cycle
+Repeat...
 ```
 
-You don't need to be rigid about this — if you have a strong flow matching hypothesis early, go straight to Phase 2. The phases are a guide, not a rule.
+### Architecture Order
+
+**Start with Transformer** — it is the most established architecture with the best-understood training dynamics. Improvements found here (especially flow matching tricks like timestep sampling, loss weighting, solver upgrades) are most likely to transfer as warm starts to the other architectures.
+
+Then Equiv-GNN, then Pairformer. This order is fixed across cycles.
+
+### Why 24 Trials per Architecture?
+
+- "Converged" is hard to detect — a string of 3-5 failures doesn't mean the architecture is tapped out, it might mean you're trying the wrong ideas. A hard limit forces you to move on and return later with fresh perspective.
+- 24 trials at ~10 min each = ~4 hours per architecture = ~12 hours per full cycle. A 48-hour session completes ~4 full cycles.
+- Later cycles benefit from cross-architecture transfer: a flow matching trick that worked for Transformer may have been rejected for GNN, but a GNN architecture change in cycle 1 might make it work in cycle 2.
+
+### Why Per-Architecture Flow Matching?
+
+Different architectures have different inductive biases. A GNN may benefit from velocity prediction while a Transformer does better with x1-prediction. SNR weighting may help attention models more than message-passing networks. Letting each architecture find its own best flow matching recipe produces stronger baselines for the scaling experiments.
+
+## Session Guide
+
+Each session works on **one architecture**. Read `autoresearch/program_session.md` for the full workflow and all seeded ideas.
 
 ## GPU Allocation
 
-With 8 GPUs available:
+All 8 GPUs test variants of the current architecture (4 sizes x 2 LRs = 8 jobs). Each variant trains for `--train_time` minutes (default 10). One iteration takes ~10 min wall time.
 
-- **Architecture phase:** All 8 GPUs test variants of one architecture (4 sizes × 2 LRs). Each variant runs for `--train_time` minutes (default 10), so one iteration takes ~10 min wall time.
+## Accept/Reject
 
-- **Flow matching phase:** All 8 GPUs test variants of one architecture at a time. The harness runs each architecture sequentially (equiv_gnn → transformer → pairformer), so one iteration takes ~30 min wall time (3 × 10 min).
-
-## Accept/Reject Rules
-
-| Phase | Accept if... | Reject if... |
-|-------|-------------|-------------|
-| Architecture | Aggregate g(r) improves for that arch | Any degradation |
-| Flow matching | `all_archs_improved` is true | Any arch degrades |
+A change is accepted if the **per-arch aggregate g(r) distance improves** for the target architecture. That's it — no cross-architecture gate.
 
 ## Experiment Log
 
-Both phases share the same log at `outputs/autoresearch/experiments.jsonl`. Each entry records:
-- Which phase (arch or flow matching)
-- Which arch(es) were tested
-- Per-arch and per-variant results
+All experiments are logged to `outputs/autoresearch/experiments.jsonl`. Each entry records:
+- Target architecture
+- Per-variant results
 - Whether the change was kept or reverted
+- Which files were changed (model, flow matching, or both)
 
-**Always read the log before starting a new iteration.** It's your memory of what has been tried and what worked.
+**Always read the log before starting a new iteration.** It's your memory of what has been tried and what worked. Count trials per architecture to know when to rotate.
 
 ## Getting Started
 
 ```bash
 # 1. Establish baseline
-uv run python autoresearch/baseline.py --data hard_sphere_N50
+uv run python autoresearch/baseline.py --data chain_N50
 
-# 2. Start with architecture improvements
-#    Read autoresearch/program_arch.md, then:
-uv run python autoresearch/run.py --archs equiv_gnn --data hard_sphere_N50 --n_gpus 8
+# 2. Start with Transformer (first architecture in rotation)
+#    Read autoresearch/program_session.md, then:
+uv run python autoresearch/run.py --archs transformer --data chain_N50 --n_gpus 8 \
+  --description "description of the change"
 
-# 3. Switch to flow matching improvements
-#    Read autoresearch/program_flow.md, then:
-uv run python autoresearch/run.py --archs all --data hard_sphere_N50 --n_gpus 8
+# 3. After 24 trials, rotate to Equiv-GNN
+uv run python autoresearch/run.py --archs equiv_gnn --data chain_N50 --n_gpus 8 \
+  --description "description of the change"
+
+# 4. After 24 trials, rotate to Pairformer
+uv run python autoresearch/run.py --archs pairformer --data chain_N50 --n_gpus 8 \
+  --description "description of the change"
+
+# 5. After 24 trials, start Cycle 2 with Transformer again
 ```
+
+Always pass `--description` so the experiment is auto-logged.
+
+## Key Research References
+
+- Lipman et al., "Flow Matching for Generative Modeling" (2023) — foundation
+- Tong et al., "Improving and Generalizing Flow-Based Models with Minibatch OT" (2023) — OT-CFM
+- Esser et al., Stable Diffusion 3 (2024) — logit-normal timestep sampling
+- "Training Flow Matching: The Role of Weighting and Parameterization" (2025) — SNR weighting, parameterization-architecture interaction
+- Karras et al., EDM2 (2024) — EMA, magnitude-preserving design
+- Kim et al., AtomMOF (2025) — x1-prediction, L1 loss, time-weighted auxiliary distance loss, SDE sampling
+- FlowMol3 (2025) — self-conditioning, late-stage geometry distortion
+- SemlaFlow (2024) — scale OT, latent attention
+- "Stochastic Sampling from Deterministic Flow Models" (2024) — velocity-to-score SDE conversion

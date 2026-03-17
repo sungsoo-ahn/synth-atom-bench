@@ -119,8 +119,17 @@ def get_task(cfg: DictConfig) -> Task:
 
 def get_task_from_data(path: str) -> Task:
     """Auto-detect task from .npz file contents (for standalone eval)."""
+    import warnings
+
     import numpy as np
     data = np.load(path)
     has_bond = "bond_length" in data.files
     data.close()
-    return ChainTask() if has_bond else HardSphereTask()
+    if has_bond:
+        return ChainTask()
+    warnings.warn(
+        f"No 'bond_length' field in {path} — defaulting to HardSphereTask. "
+        "If this is chain data, the .npz may be missing required fields.",
+        stacklevel=2,
+    )
+    return HardSphereTask()

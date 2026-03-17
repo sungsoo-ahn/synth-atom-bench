@@ -203,6 +203,13 @@ def main(cfg: DictConfig) -> None:
         num_workers=0,
     )
 
+    # Persist task-specific model kwargs into config so checkpoints can reconstruct the model
+    task_kwargs = task.model_kwargs()
+    if task_kwargs:
+        with open_dict(cfg):
+            for k, v in task_kwargs.items():
+                cfg.model.model_kwargs[k] = v
+
     # Build model
     model = build_model(cfg, box_size, task).to(device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -323,7 +330,8 @@ def main(cfg: DictConfig) -> None:
             extra_metrics = {k: v for k, v in ckpt_kwargs.items()
                             if k not in ("clash_rate", "gr_distance")}
             logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step,
-                            extra_metrics=extra_metrics or None)
+                            extra_metrics=extra_metrics or None,
+                            clash_rate=ev["clash_rate"])
 
             # Log all metrics
             log_metrics = {"train/total_flops": total_flops}
@@ -338,11 +346,14 @@ def main(cfg: DictConfig) -> None:
                           clash_rate=cr, config=config_dict, gr_distance=grd, **ckpt_kwargs)
             print(_format_eval_msg(step, ev, ckpt_mgr.best_gr_distance))
 
-        # Periodic checkpoint (without eval)
+        # Periodic checkpoint (without eval) — carry forward best metrics
         elif step % cfg.checkpoint.every_n_steps == 0:
             ckpt_mgr.save(
                 model, optimizer, epoch=0, step=step,
                 clash_rate=ckpt_mgr.best_clash_rate, config=config_dict,
+                gr_distance=ckpt_mgr.best_gr_distance,
+                bond_violation_rate=ckpt_mgr.best_bond_violation_rate,
+                nonbonded_clash_rate=ckpt_mgr.best_nonbonded_clash_rate,
             )
             print(f"  Step {step:6d} | Checkpoint saved")
 
@@ -353,7 +364,8 @@ def main(cfg: DictConfig) -> None:
     extra_metrics = {k: v for k, v in ckpt_kwargs.items()
                     if k not in ("clash_rate", "gr_distance")}
     logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step,
-                    extra_metrics=extra_metrics or None)
+                    extra_metrics=extra_metrics or None,
+                    clash_rate=ev["clash_rate"])
     cr = ckpt_kwargs.pop("clash_rate")
     grd = ckpt_kwargs.pop("gr_distance")
     ckpt_mgr.save(model, optimizer, epoch=0, step=step,

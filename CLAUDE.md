@@ -1,205 +1,167 @@
 # CLAUDE.md
 
-## Project: SynthBench3D — Hard Sphere Packing Benchmark
+## Project: Scaling Laws for Structure Generation
 
-### Big Picture
+### Motivation
 
-We want to discover **scaling laws for 3D generative models** — how does performance improve as you increase compute, data, and model size? The end goal is to guide architecture selection for 3D structure foundation models (molecules, proteins, materials).
+Scaling laws are well-established for predictive atomistic models (UMA, Nomura et al., DPA-3). No one has studied whether similar scaling laws hold for **generative models** that produce atomic structures. This project fills that gap with synthetic benchmarks where the ground truth distribution is fully known.
 
-Real molecular data is expensive and confounded — you can't isolate why one model beats another. So we build **synthetic tasks with known ground truth** where we can run controlled scaling experiments cheaply.
+### Setup: Model Polymer Chain
 
-Hard sphere packing is the first task: the simplest possible 3D structure problem where the only challenge is avoiding atomic clashes. Future tasks will isolate other challenges (bond constraints, symmetry, multimodality, long-range dependencies). Together they form a diagnostic suite that decomposes what makes 3D structure prediction hard.
+A linear chain of N atoms (N = 10–20) in 3D, connected as 1-2-3-...-N. A coarse-grained polymer analogous to a protein backbone. The fixed chain topology eliminates ambiguity about which atoms interact.
 
-The key deliverable is: **for each architecture family, a scaling exponent that predicts how performance improves with compute.** If architecture A has a better scaling exponent than B on clash avoidance, that means A will increasingly dominate as foundation models scale up — even if B looks better at small scale. This is actionable information for anyone building 3D foundation models.
+The energy function sums terms with increasing geometric complexity:
 
-### Phase 1 Scope
+- **k=2 (bond lengths):** V₂ = Σᵢ k₂(rᵢ,ᵢ₊₁ - r₀)². Preferred distance between consecutive atoms.
+- **k=3 (bond angles):** V₃ = Σᵢ k₃(θᵢ₋₁,ᵢ,ᵢ₊₁ - θ₀)². Preferred angle at each atom, analogous to Ramachandran constraints.
+- **k=4 (dihedrals):** V₄ = Σᵢ k₄(φᵢ₋₁,ᵢ,ᵢ₊₁,ᵢ₊₂ - φ₀)². Torsion angles introducing longer-range structural coupling.
 
-Compare GNN, Transformer, and Pairformer on generating non-overlapping atom configurations. The only difficulty is the clash constraint.
+Terms are cumulative: k=3 includes bond+angle, k=4 includes all three. Simple harmonic potentials throughout — the only thing that changes across k is the geometric nature of the constraint.
 
-## Problem
+Three fixed presets:
+- `multibody_2`: V₂ only
+- `multibody_23`: V₂ + V₃
+- `multibody_234`: V₂ + V₃ + V₄
 
-Sample from the uniform distribution over non-overlapping sphere configurations:
+### Data Generation
 
+Samples from the Boltzmann distribution p(x) ∝ exp(-E(x)/T) via overdamped Langevin dynamics with parallel chains on GPU. Three temperatures per preset:
+- T_high (T=2.0): Broad, fluid-like. Easy to generate.
+- T_mid (T=1.0): Moderate structure. Intermediate difficulty.
+- T_low (T=0.5): Sharp distribution near minima. Hard to generate.
+
+Training datasets of varying sizes (10K, 50K, 200K) for data scaling.
+
+```bash
+uv run python data/generate_multibody.py \
+  --N 20 --T 1.0 --preset multibody_23 \
+  --num_samples 50000 --seed 42 \
+  --output outputs/data/multibody_23_N20_T1.0/train.npz
 ```
-p(x_1, ..., x_N) ∝ ∏_{i<j} 𝟙[|x_i - x_j| > 2r]
-```
 
-N atoms with radius r in a cubic box of side L. Difficulty controlled by packing fraction η = N(4/3)πr³/L³.
-
-## Data Generation
-
-MCMC (Metropolis-Hastings) sampler:
-1. Initialize by sequential random placement with rejection
-2. Propose single-atom displacements, accept if no overlap
-3. Collect samples after burn-in, thin to reduce autocorrelation
-4. Save as .npz with positions (N×3), radius r, box size L
-
-Generate 50k train / 5k val / 10k test samples for each setting (η fixed at 0.3):
-- N=10 (hard_sphere_N10)
-- N=50 (hard_sphere_N50)
+Output .npz fields: `positions` (num_samples, N, 3), `box_size`, `N`, `temperature`, `preset`, potential params (`k2`, `r0`, `k3`, `theta0`, `k4`, `phi0`), `energies`.
 
 ## Generative Framework
 
-Conditional flow matching (Lipman et al., 2023), shared across all architectures. Each architecture is a velocity network v_θ(x_t, t) → predicted velocity field.
+Conditional flow matching (OT-CFM). DiT (Diffusion Transformer) backbone as velocity network v_θ(x_t, t) → predicted velocity field.
 
-Interpolation: x_t = (1 - t) ε + t x_0, where ε ~ N(0, I), t ∈ [0, 1]
-Loss: ||v_θ(x_t, t) - (x_0 - ε)||²
-Sampling: ODE integration from x_0 ~ N(0, I) to x_1 using Euler method with fixed number of steps (same for all models)
+Interpolation: x_t = (1 - t) ε + t x₀, where ε ~ N(0, I), t ∈ [0, 1]
+Loss: ||v_θ(x_t, t) - (x₀ - ε)||²
+Sampling: ODE integration from x₀ ~ N(0, I) to x₁
 
-## Architectures
+## Architecture
 
-All architectures take atom positions x_t and timestep t as input, output predicted velocity of same shape (N×3).
-
-**GNN (PaiNN)**
-- Equivariant message passing with both scalar and vector features per atom
-- Continuous-filter convolutions with radial basis functions on pairwise distances
-- Vector features naturally map to velocity output (equivariant by construction)
-- K message passing layers
-- Local: each atom aggregates info from neighbors within cutoff
-- Reference implementation: SchNetPack (https://github.com/atomistic-machine-learning/schnetpack)
-  - Extract PaiNN representation from `schnetpack.representation` — reimplement faithfully based on their code
-  - Reimplement as velocity network: add timestep embedding, read out velocity from vector features
-  - Paper: "Equivariant message passing for the prediction of tensorial properties and molecular spectra" (Schütt et al., 2021)
-
-**Transformer**
+**Transformer (DiT-style)** — the sole architecture, in `models/transformer.py`:
 - Global self-attention over all atoms
 - Pairwise distance features injected as attention bias
-- No built-in equivariance, use random rotation augmentation
-- Sinusoidal timestep embedding added to atom features via adaptive layer norm
-- Reference implementation: SimpleFold (https://github.com/apple/ml-simplefold)
-  - Uses standard transformer blocks with adaptive layers + flow matching — exactly our setup
-  - Extract the FoldingDiT transformer blocks from `simplefold.model`
-  - Already uses flow matching, so the integration is natural
-  - Paper: "SimpleFold: Folding Proteins is Simpler than You Think" (Apple, 2025)
-
-**Pairformer (AlphaFold2/Boltz-style)**
-- Single representation (per-atom) + pair representation (per-atom-pair)
-- Pair representation initialized from pairwise distance features
-- Triangular multiplicative updates on pair representation
-- Attention on single representation weighted by pair representation
-- Reference implementation: Boltz (https://github.com/jwohlwend/boltz)
-  - Extract PairformerStack from `boltz.model`
-  - Well-tested against AlphaFold3 architecture
-  - More complex codebase — extract only the Pairformer module, not the full pipeline
-  - Paper: "Boltz-1: Democratizing Biomolecular Interaction Modeling" (Wohlwend et al., 2024)
+- Sinusoidal timestep embedding via adaptive layer norm (adaLN-Zero)
+- Random rotation augmentation (learns rotational invariance from data)
+- Atom ordering embeddings for chain topology
+- Reference: SimpleFold (Apple, 2025) — standard transformer blocks + flow matching
+- Model sizes: xs (32d/2L), small (64d/3L), medium (128d/6L), large (256d/8L), xl (384d/10L)
 
 ## Metric
 
-**Clash rate**: fraction of generated samples with any pairwise distance < 2r.
+**Energy Wasserstein distance** (W₁): Wasserstein-1 distance between the energy distributions of generated samples and reference data. Lower is better.
 
 ```python
-def clash_rate(positions, radius):
-    # positions: (batch, N, 3)
-    dists = torch.cdist(positions, positions)  # (batch, N, N)
-    mask = ~torch.eye(N, dtype=bool)  # exclude self
-    min_dists = dists[:, mask].reshape(batch, -1).min(dim=1).values
-    return (min_dists < 2 * radius).float().mean()
+from metrics.energy import energy_metrics_batched
+# Returns: {"energy_wasserstein": float, "mean_energy_ratio": float}
+metrics = energy_metrics_batched(generated_samples, dataset)
 ```
 
-Generate 10k samples per model, report clash rate.
+This is the sole metric for training eval, checkpointing, autoresearch accept/reject, and scaling law fits.
 
-## Comparison: Compute-Matched Scaling
+## Scaling Experiments
 
-This is the core experiment. We want scaling curves: clash_rate vs. compute for each architecture.
+### Compute Scaling
 
-For each total compute budget C (measured in total training FLOPs):
-1. For each architecture, sweep model size (width, depth) and training steps
+For each total compute budget C (total training FLOPs):
+1. Sweep model size (width, depth) and training steps
 2. Constraint: FLOPs_per_step × num_steps ≤ C
-3. Tune learning rate (2 trials: 1e-4, 1e-3)
-4. Report best clash rate at each budget
+3. Tune learning rate
+4. Report best energy Wasserstein at each budget
 
-Budgets (total training FLOPs): 1e15, 4e15, 1.6e16, 6.4e16, 2.56e17.
-
-Fit scaling law per architecture:
-
+Fit scaling law:
 ```
-clash_rate(C) = a × C^(-α) + floor      (C = total training FLOPs)
+energy_wasserstein(C) = a × C^(-α) + floor
 ```
 
-- **α** (scaling exponent): how fast performance improves with compute. Higher = better scaling. This is the main result.
-- **floor**: irreducible clash rate. May differ by architecture — reveals fundamental limitations.
-- **a** (prefactor): initial performance. Less important than α at scale.
+- **α** (scaling exponent): how fast performance improves with compute. The main result.
+- **floor**: irreducible error from finite evaluation samples.
 
-### What to look for
+### What to Look For
 
-- If α_pairformer > α_gnn > α_transformer: pair representations are the right inductive bias for geometric constraints, and this advantage compounds with scale.
-- If α values are similar but floors differ: architectures scale similarly but have different fundamental limits.
-- If rankings flip between small and large compute: the "best" architecture depends on your budget — critical for practitioners.
-- If any architecture hits floor early: it has a fundamental bottleneck that more compute can't fix.
+- How does α change across interaction orders (k=2 vs k=3 vs k=4)? The DiT uses pairwise attention, so three-body and four-body constraints require implicit higher-order learning.
+- Temperature interaction: low T (sharp, multi-modal) may show threshold behavior rather than smooth power laws.
+- Data scaling: is generation more data-hungry than prediction?
+- Mode coverage vs. sample quality: does the model improve on known modes before discovering new ones?
 
-### Secondary scaling axes (run after main experiment)
+### Secondary Axes
 
-- **Data scaling**: fix model size, vary training set size (1k, 5k, 10k, 50k). Which architecture is most data-efficient?
-- **Problem scaling**: fix compute, vary N (10, 20, 50) and η (0.1, 0.3, 0.5). How does difficulty scaling interact with architecture choice?
+- **Data scaling**: fix model size, vary training set size (10K, 50K, 200K). How data-efficient is the model?
+- **Problem scaling**: vary N (10, 20) and T (0.5, 1.0, 2.0). How does difficulty interact with scale?
 
 ## Project Structure
 
 ```
 ├── CLAUDE.md
-├── configs/                    # Hydra configs
-│   ├── config.yaml
+├── configs/
 │   ├── train.yaml
-│   ├── sweep.yaml
 │   ├── data/
+│   │   └── multibody_{2,23,234}_N{10,20}_T{0.5,1.0,2.0}.yaml
 │   ├── model/
-│   │   ├── equiv_gnn.yaml
-│   │   ├── transformer.yaml
-│   │   └── pairformer.yaml
+│   │   └── transformer.yaml
 │   └── logging/
 ├── data/
-│   ├── generate.py             # MCMC hard sphere sampler
-│   ├── dataset.py              # PyTorch dataset
-│   └── validate.py             # Check g(r) of generated data
+│   ├── generate_multibody.py       # Langevin dynamics sampler
+│   ├── multibody_dataset.py        # PyTorch dataset
+│   └── validate_multibody.py       # Distribution validation plots
 ├── models/
-│   ├── equiv_gnn.py            # Equivariant GNN velocity network (PaiNN-based)
-│   ├── transformer.py          # Transformer velocity network from SimpleFold
-│   ├── pairformer.py           # Pairformer velocity network from Boltz
-│   └── common.py               # Shared: timestep embedding, atom ordering
+│   ├── transformer.py              # DiT velocity network
+│   └── common.py                   # Shared: timestep embedding, RBF, atom ordering
 ├── flow_matching/
 │   ├── interpolation.py
 │   ├── training.py
 │   └── sampling.py
 ├── metrics/
-│   └── clash_rate.py
+│   ├── energy.py                   # GPU energy computation + Wasserstein metric
+│   ├── gr_distance.py              # Pair correlation g(r) utilities
+│   └── clash_rate.py               # Pairwise clash detection
 ├── viz/
-│   ├── style.py                # Global style: fonts, colors, save_figure
-│   ├── structure.py            # 3D atom structure plots
-│   ├── metrics.py              # g(r) and min distance histogram
-│   ├── scaling.py              # Scaling curves and capability heatmap
+│   ├── style.py                    # Global style: fonts, colors, save_figure
+│   ├── structure.py                # 3D atom structure plots
+│   ├── metrics.py                  # g(r) and min distance histogram
+│   ├── scaling.py                  # Scaling curves and capability heatmap
 │   └── examples/
-│       └── generate_examples.py  # Visual QA script
+│       └── generate_examples.py
 ├── experiments/
-│   ├── train.py                # Hydra-based training loop
-│   ├── evaluate.py             # Generate samples + compute clash rate
-│   ├── scaling.py              # Compute-matched scaling sweep
-│   ├── sweep_hparams.py        # Hyperparameter sweep orchestrator
-│   ├── model_registry.py       # Shared model registry and size presets
-│   ├── tasks.py                # Task abstraction (hard_sphere, chain)
-│   ├── logger.py               # File-based logging (JSONL)
-│   └── checkpointing.py        # Checkpoint management
+│   ├── train.py                    # Hydra-based training loop
+│   ├── evaluate.py                 # Generate samples + compute metrics
+│   ├── scaling.py                  # Compute-matched scaling sweep
+│   ├── scaling_auto.py             # Fully automated scaling pipeline
+│   ├── sweep_hparams.py            # Hyperparameter sweep orchestrator
+│   ├── model_registry.py           # Model registry and size presets
+│   ├── tasks.py                    # Task abstraction (MultibodyTask)
+│   ├── logger.py                   # File-based logging (JSONL)
+│   └── checkpointing.py            # Checkpoint management
+├── autoresearch/
+│   ├── program.md                  # Autoresearch strategy
+│   ├── program_session.md          # Session workflow and seeded ideas
+│   ├── run.py                      # Quick train+eval harness
+│   ├── baseline.py                 # Oracle energy Wasserstein baseline
+│   ├── experiment_log.py           # Experiment logging
+│   └── visualize.py                # Progress visualization
 ├── scripts/
+│   ├── run_autoresearch.sh
 │   ├── run_scaling.sh
-│   ├── run_sweep.sh
-│   └── validate_painn.py
+│   └── run_sweep.sh
 └── tests/
     ├── test_data.py
     ├── test_models.py
     ├── test_flow_matching.py
     └── test_metrics.py
 ```
-
-## Implementation Order
-
-1. `data/generate.py` — MCMC sampler, validate with pair correlation function
-2. `data/dataset.py` — PyTorch dataset loading .npz files
-3. `metrics/clash_rate.py` — GPU-accelerated clash rate computation
-4. `flow_matching/` — shared interpolation, loss, ODE sampler
-5. `models/equiv_gnn.py` — reimplement SchNetPack PaiNN as velocity network
-6. `models/transformer.py` — reimplement SimpleFold transformer blocks as velocity network
-7. `models/pairformer.py` — reimplement Boltz PairformerStack as velocity network
-8. `experiments/train.py` — training loop with Hydra configs
-9. `experiments/evaluate.py` — generate samples + compute clash rate
-10. `experiments/scaling.py` — compute-matched sweep
 
 ## Tech Stack
 
@@ -218,45 +180,52 @@ All generated artifacts go under `outputs/`, never mixed with source code:
 
 ```
 outputs/
-├── data/{task}_{N}/         # Generated .npz datasets (e.g. hard_sphere_N10/, chain_N10/)
-├── plots/                   # All visualizations and figures
-├── checkpoints/{arch}/      # Model weights (gnn/, transformer/, pairformer/)
-├── logs/{arch}/             # Training logs
-├── eval/{arch}/             # Evaluation results (generated samples + metrics)
-├── scaling/                 # Scaling law sweep results
-└── experiment_logs/         # Persistent records of completed experiments
+├── data/{preset}_N{n}_T{temp}/  # Generated .npz datasets
+├── plots/                        # All visualizations and figures
+├── checkpoints/transformer/      # Model weights
+├── logs/transformer/             # Training logs
+├── eval/transformer/             # Evaluation results
+├── scaling/                      # Scaling law sweep results
+└── autoresearch/                 # Autoresearch logs and plots
 ```
 
 Rules:
-- **Never write files to source directories** (`data/`, `metrics/`, `models/`, etc.). All outputs (data, plots, checkpoints, logs) go under `outputs/`.
-- **Always use `--output` flags** pointing into `outputs/` when running scripts. Example: `python data/generate.py --output outputs/data/hard_sphere_N10/train.npz`
-- **Clean up after test/debug runs.** If you generate temporary files for testing (e.g. small sample counts, scratch plots), delete them when done. Do not leave behind files named `test_*`, `tmp_*`, `debug_*`, or similar in `outputs/`.
-- **No stale checkpoints.** When a training run is superseded or was a failed experiment, remove its checkpoint directory rather than leaving dead weights around.
-- **Name files descriptively.** Use the pattern `{split}_{setting}.npz` for data (e.g. `train.npz`, `val.npz`, `test.npz`) and `{description}.png` for plots. Never use generic names like `output.npz` or `plot.png`.
+- **Never write files to source directories** (`data/`, `metrics/`, `models/`, etc.). All outputs go under `outputs/`.
+- **Always use `--output` flags** pointing into `outputs/` when running scripts.
+- **Clean up after test/debug runs.** Delete temporary files when done.
+- **No stale checkpoints.** Remove superseded or failed experiment checkpoints.
+- **Name files descriptively.** Use `{split}.npz` for data, `{description}.png` for plots.
 - **The `outputs/` directory is gitignored.** It must never be committed.
 
 ## Key Design Decisions
 
-- All models share the same flow matching framework — the only variable is the velocity network architecture
-- Same ODE sampler (Euler, same steps) for all models at evaluation
-- Same training data, same augmentation (random rotations for all)
-- FLOPs measured with torch profiler for fair compute matching — total training FLOPs (not GPU-hours) is the x-axis for all scaling curves
-- Use established reference implementations (SchNetPack, SimpleFold, Boltz) — reimplement faithfully based on their code rather than importing as dependencies, adding only timestep embedding + output projection
-- All visualization uses the `viz/` package with `synthbench_style()` context manager for consistent publication-quality plots
+- Single architecture (Transformer/DiT) — scaling behavior is the variable, not architecture comparison
+- Flow matching framework shared with potential future architectures
+- Same ODE sampler (Euler, same steps) at evaluation
+- Random rotation augmentation (model learns rotational invariance from data)
+- FLOPs measured with torch profiler — total training FLOPs is the x-axis for scaling curves
+- Energy Wasserstein distance as sole evaluation metric — directly measures distributional quality
+- All visualization uses `viz/` package with `synthbench_style()` context manager
 
 ## Autoresearch Mode
 
 For autonomous algorithm improvement sessions:
-- **Start here:** `autoresearch/program.md` — strategy overview (cyclic per-arch optimization, 24 trials each)
+- **Start here:** `autoresearch/program.md` — strategy overview
 - **Session guide:** `autoresearch/program_session.md` — detailed workflow and seeded ideas
 
-Each session optimizes one architecture at a time, editing both `models/{arch}.py` and `flow_matching/*.py` together. When switching to the next architecture, the flow matching state carries over as a warm start.
+Each session edits `models/transformer.py` and `flow_matching/*.py`. Changes accepted if energy Wasserstein improves.
 
-Run `uv run python autoresearch/baseline.py --data chain_N50` first to establish baseline.
+```bash
+# Establish baseline first
+uv run python autoresearch/baseline.py --data multibody_23_N20_T1.0
+
+# Run autoresearch
+bash scripts/run_autoresearch.sh --data multibody_23_N20_T1.0 --n_gpus 8
+```
 
 ## Automated Scaling
 
 For fully automated scaling law experiments:
 ```bash
-uv run python experiments/scaling_auto.py --task hard_sphere --n_atoms 50 --archs equiv_gnn,transformer,pairformer --n_gpus 8
+uv run python experiments/scaling_auto.py --task multibody --n_atoms 20 --archs transformer --n_gpus 8
 ```

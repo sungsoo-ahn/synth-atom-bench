@@ -10,17 +10,15 @@ _project_root = Path(__file__).resolve().parents[2]
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from data.validate import pair_correlation
 from viz.style import ARCH_COLORS, synthbench_style, save_figure
 from viz.structure import plot_structures_grid
-from viz.metrics import plot_gr, plot_min_distance_hist
 from viz.scaling import plot_scaling_curves, plot_capability_heatmap
 
 OUT_DIR = _project_root / "outputs" / "plots" / "examples"
 
 
 def _load_test_data():
-    path = _project_root / "outputs" / "data" / "hard_sphere_N10" / "train.npz"
+    path = _project_root / "outputs" / "data" / "multibody_23_N10_T1.0" / "train.npz"
     data = np.load(path)
     return data["positions"], float(data["radius"]), float(data["box_size"])
 
@@ -67,8 +65,8 @@ def example_scaling_curves():
         cr = np.clip(cr, 1e-4, 1.0)
         results[arch] = {
             "flops": flops_vals,
-            "clash_rate": cr,
-            "clash_rate_std": np.abs(rng.normal(0, 0.005, size=cr.shape)),
+            "metric": cr,
+            "metric_std": np.abs(rng.normal(0, 0.005, size=cr.shape)),
         }
 
     with synthbench_style():

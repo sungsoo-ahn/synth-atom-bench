@@ -15,8 +15,6 @@ import matplotlib.pyplot as plt
 
 from experiments.model_registry import ARCH_DISPLAY_NAMES
 
-from data.generate import mcmc_sample
-from data.generate_chains import mcmc_chain_sample
 from viz.scaling import plot_scaling_curves
 from viz.structure import plot_structure
 from viz.style import save_figure, synthbench_style
@@ -24,78 +22,44 @@ from viz.style import save_figure, synthbench_style
 OUT_DIR = _project_root / "docs" / "assets"
 
 
-def _load_or_generate_spheres(N, eta, radius=0.5, seed=42):
-    """Load hard sphere data from outputs, or generate on the fly."""
-    data_path = _project_root / f"outputs/data/N{N}_eta{eta}/train.npz"
-    if data_path.exists():
-        data = np.load(data_path)
-        return data["positions"][0], float(data["radius"]), float(data["box_size"])
-
-    print(f"  Generating hard spheres N={N}, eta={eta} (no cached data)...")
-    samples, box_size = mcmc_sample(N=N, radius=radius, eta=eta, num_samples=5, seed=seed)
-    return samples[0], radius, box_size
-
-
-def _load_or_generate_chain(N, bond_length=1.0, radius=0.3, seed=42):
-    """Load chain data from outputs, or generate on the fly."""
-    data_path = _project_root / f"outputs/data/chain_N{N}/train.npz"
-    if data_path.exists():
-        data = np.load(data_path)
-        return data["positions"][0], float(data["radius"])
-
-    print(f"  Generating chain N={N} (no cached data)...")
-    samples = mcmc_chain_sample(
-        N=N, bond_length=bond_length, radius=radius, num_samples=5, seed=seed,
-    )
-    return samples[0], radius
-
-
 def hero_structures():
-    """2x3 grid: hard spheres (top) and chains (bottom) at N=10, 20, 50."""
+    """1x3 grid: multibody configurations at N=10, 20, 50."""
     Ns = [10, 20, 50]
 
     with synthbench_style():
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10),
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5),
                                  subplot_kw={"projection": "3d"},
                                  layout="none")
 
-        # Top row: hard spheres
         for col, N in enumerate(Ns):
-            positions, radius, box_size = _load_or_generate_spheres(N, eta=0.3)
-            ax = axes[0, col]
-            plot_structure(positions, radius, box_size, ax=ax, title=f"N = {N}")
-            ax.set_xlabel("")
-            ax.set_ylabel("")
-            ax.set_zlabel("")
+            data_path = _project_root / f"outputs/data/multibody_23_N{N}_T1.0/val.npz"
+            if not data_path.exists():
+                print(f"  hero_structures: SKIPPED (missing {data_path})")
+                return
+            data = np.load(data_path)
+            positions = data["positions"][0]
+            radius = float(data["radius"])
+            box_size = float(data["box_size"]) if "box_size" in data else None
 
-        # Bottom row: chains
-        for col, N in enumerate(Ns):
-            positions, radius = _load_or_generate_chain(N)
+            ax = axes[col]
             bonds = [(i, i + 1) for i in range(N - 1)]
-            ax = axes[1, col]
             plot_structure(
-                positions, radius, box_size=None, ax=ax, title=f"N = {N}",
-                bonds=bonds, draw_box=False,
+                positions, radius, box_size=box_size, ax=ax, title=f"N = {N}",
+                bonds=bonds, draw_box=box_size is not None,
             )
             ax.set_xlabel("")
             ax.set_ylabel("")
             ax.set_zlabel("")
 
-        # Row labels
-        fig.text(0.02, 0.72, "Hard Sphere\nPacking", va="center", ha="center",
-                 fontsize=14, fontweight="bold", rotation=90)
-        fig.text(0.02, 0.28, "Self-Avoiding\nChains", va="center", ha="center",
-                 fontsize=14, fontweight="bold", rotation=90)
-
-        fig.subplots_adjust(left=0.07, wspace=0.05, hspace=0.12)
+        fig.subplots_adjust(left=0.02, wspace=0.05)
         save_figure(fig, OUT_DIR / "hero_structures")
     print("  hero_structures")
 
 
-def _load_scaling_results(results_path, metric_key="best_clash_rate"):
+def _load_scaling_results(results_path, metric_key="best_energy_wasserstein"):
     """Load scaling results and group by architecture.
 
-    Returns dict mapping display name -> {"flops": array, "clash_rate": array},
+    Returns dict mapping display name -> {"flops": array, "metric": array},
     filtered to entries with total_flops > 0.
     """
     with open(results_path) as f:
@@ -110,62 +74,39 @@ def _load_scaling_results(results_path, metric_key="best_clash_rate"):
         arch = entry["arch"]
         display_name = arch_name_map.get(arch, arch)
         if display_name not in arch_data:
-            arch_data[display_name] = {"flops": [], "clash_rate": []}
+            arch_data[display_name] = {"flops": [], "metric": []}
         arch_data[display_name]["flops"].append(entry["total_flops"])
-        arch_data[display_name]["clash_rate"].append(entry[metric_key])
+        arch_data[display_name]["metric"].append(entry[metric_key])
 
     results = {}
     for name, data in arch_data.items():
         order = np.argsort(data["flops"])
         results[name] = {
             "flops": np.array(data["flops"])[order],
-            "clash_rate": np.array(data["clash_rate"])[order],
+            "metric": np.array(data["metric"])[order],
         }
     return results
 
 
 def scaling_curves():
-    """Scaling curves from hard sphere experiment results."""
+    """Scaling curves from multibody experiment results (energy Wasserstein)."""
     results_path = _project_root / "outputs" / "scaling" / "results.json"
     if not results_path.exists():
         print("  scaling_curves: SKIPPED (no results.json)")
         return
 
-    results = _load_scaling_results(results_path)
+    results = _load_scaling_results(results_path, metric_key="best_energy_wasserstein")
 
     with synthbench_style():
-        fig = plot_scaling_curves(results, fit_curves=True)
+        fig = plot_scaling_curves(results, fit_curves=True, ylabel="Energy Wasserstein")
         save_figure(fig, OUT_DIR / "scaling_curves")
     print("  scaling_curves")
-
-
-def chain_scaling_curves():
-    """Scaling curves from chain experiment results (g(r) distance + clash rate)."""
-    results_path = _project_root / "outputs" / "scaling_chain" / "results.json"
-    if not results_path.exists():
-        print("  chain_scaling_curves: SKIPPED (no results.json)")
-        return
-
-    # g(r) distance
-    gr_results = _load_scaling_results(results_path, metric_key="best_gr_distance")
-    with synthbench_style():
-        fig = plot_scaling_curves(gr_results, fit_curves=True, ylabel="g(r) L1 distance")
-        save_figure(fig, OUT_DIR / "chain_scaling_gr_distance")
-    print("  chain_scaling_gr_distance")
-
-    # Clash rate
-    cr_results = _load_scaling_results(results_path, metric_key="best_clash_rate")
-    with synthbench_style():
-        fig = plot_scaling_curves(cr_results, fit_curves=True)
-        save_figure(fig, OUT_DIR / "chain_scaling_clash_rate")
-    print("  chain_scaling_clash_rate")
 
 
 def main():
     print("Generating README figures...")
     hero_structures()
     scaling_curves()
-    chain_scaling_curves()
     print(f"Done. Outputs in {OUT_DIR}")
 
 

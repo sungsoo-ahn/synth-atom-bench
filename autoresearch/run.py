@@ -48,7 +48,7 @@ def quick_train_eval(
     """Quick train loop + evaluation, constrained by wall-clock time.
 
     Args:
-        task_name: "hard_sphere" or "chain".
+        task_name: "multibody".
         train_time_s: Training time budget in seconds (excludes data loading
             and evaluation).
         seed: Random seed for reproducibility.
@@ -57,12 +57,10 @@ def quick_train_eval(
     # here (inside the subprocess) rather than at module level.
     from torch.utils.data import DataLoader
 
-    from data.validate import pair_correlation
     from experiments.tasks import TASK_REGISTRY
     from flow_matching.sampling import sample_batched
     from flow_matching.training import flow_matching_loss
-    from metrics.clash_rate import clash_rate_batched
-    from metrics.gr_distance import gr_distance
+    from metrics.energy import energy_metrics_batched
 
     # Seed for reproducibility
     torch.manual_seed(seed)
@@ -78,8 +76,6 @@ def quick_train_eval(
     n_atoms = dataset.positions.shape[1]
     radius = dataset.radius
 
-    # Precompute ground-truth g(r)
-    gt_r, gt_g_r = pair_correlation(dataset.positions.numpy(), box_size)
 
     # Center positions for flow matching
     dataset.positions = dataset.positions - box_size / 2
@@ -141,10 +137,8 @@ def quick_train_eval(
         n_steps=n_ode_steps, batch_size=min(batch_size, eval_samples), device=device,
     )
     samples = samples + box_size / 2
-    cr = clash_rate_batched(samples, radius)
-    grd = gr_distance(samples.numpy(), gt_r, gt_g_r, box_size)
 
-    # Task-specific metrics (e.g. bond_violation_rate, nonbonded_clash_rate for chains)
+    # Compute energy metrics
     task_metrics = task.compute_metrics(samples, dataset)
 
     wall_time = time.time() - t0
@@ -155,8 +149,7 @@ def quick_train_eval(
         torch.cuda.empty_cache()
 
     result = {
-        "gr_distance": grd,
-        "clash_rate": cr,
+        "energy_wasserstein": task_metrics.get("energy_wasserstein", float("inf")),
         "steps": step,
         "train_time_s": round(actual_train_time, 1),
         "wall_time_s": round(wall_time, 1),
@@ -373,7 +366,7 @@ def run_all_jobs(
 
 
 def _best_variant_result(variant_results: dict[str, dict]) -> tuple[float | None, str | None, list[str]]:
-    """Find best (lowest) g(r) distance from variant results.
+    """Find best (lowest) energy Wasserstein distance from variant results.
 
     Returns (best_value, best_label, all_succeeded_labels).
     """
@@ -381,23 +374,23 @@ def _best_variant_result(variant_results: dict[str, dict]) -> tuple[float | None
     best_label = None
     succeeded = []
     for label, r in variant_results.items():
-        if "gr_distance" in r and r.get("status") != "error":
+        if "energy_wasserstein" in r and r.get("status") != "error":
             succeeded.append(label)
-            if best_val is None or r["gr_distance"] < best_val:
-                best_val = r["gr_distance"]
+            if best_val is None or r["energy_wasserstein"] < best_val:
+                best_val = r["energy_wasserstein"]
                 best_label = label
     return best_val, best_label, succeeded
 
 
 def load_previous_best_per_arch(log_path: str, data_name: str | None = None) -> dict[str, float]:
-    """Load best g(r) distance per architecture from the experiment log.
+    """Load best energy Wasserstein per architecture from the experiment log.
 
     Scans all kept entries and tracks the best per-arch metric seen.
     Reads the "best" field (best-of-N); falls back to "aggregate" for old entries.
 
     Args:
         data_name: If provided, only consider entries matching this data config
-            (e.g. "chain_N50"). Prevents cross-task contamination when switching
+            (e.g. "multibody_23_N50_T1.0"). Prevents cross-task contamination when switching
             between tasks.
 
     Returns:
@@ -435,7 +428,7 @@ def load_baseline(baseline_path: str, data_name: str) -> float | None:
         return None
     with open(baseline_path) as f:
         baselines = json.load(f)
-    return baselines.get(data_name, {}).get("gr_distance")
+    return baselines.get(data_name, {}).get("energy_wasserstein")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -445,9 +438,9 @@ def main():
     parser = argparse.ArgumentParser(description="Autoresearch quick train+eval harness")
     parser.add_argument(
         "--archs", required=True,
-        help='Architecture to test (e.g. "transformer", "equiv_gnn", "pairformer")',
+        help='Architecture to test (e.g. "transformer", )',
     )
-    parser.add_argument("--data", required=True, help="Data config name (e.g. hard_sphere_N50)")
+    parser.add_argument("--data", required=True, help="Data config name (e.g. multibody_23_N50_T1.0)")
     parser.add_argument("--train_time", type=float, default=10.0, help="Training time per variant in minutes (default: 10)")
     parser.add_argument("--n_gpus", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=256)
@@ -476,7 +469,7 @@ def main():
         data_cfg = yaml.safe_load(f)
     data_dir = data_cfg["data_dir"]
     args.data_path = os.path.join(data_dir, "train.npz")
-    args.task_name = data_cfg.get("task", "hard_sphere")
+    args.task_name = data_cfg.get("task", "multibody")
     if not os.path.isfile(args.data_path):
         print(json.dumps({"status": "error", "error": f"Training data not found: {args.data_path}"}))
         sys.exit(1)
@@ -506,7 +499,7 @@ def main():
 
     n_ok = len(succeeded)
     n_total = len(all_results[arch])
-    print(f"  [{arch}] Best g(r) distance: {best_val:.6f} ({best_label}, {n_ok}/{n_total} ok)", file=sys.stderr)
+    print(f"  [{arch}] Best energy Wasserstein: {best_val:.6f} ({best_label}, {n_ok}/{n_total} ok)", file=sys.stderr)
 
     # Load baseline and previous best
     baseline_path = "outputs/autoresearch/baselines.json"
@@ -531,7 +524,7 @@ def main():
     output = {
         "status": "success",
         "arch": arch,
-        "metric_name": "gr_distance",
+        "metric_name": "energy_wasserstein",
         "per_arch": per_arch_output,
         "best_metric": round(best_val, 6),
         "baseline_metric": baseline_metric,

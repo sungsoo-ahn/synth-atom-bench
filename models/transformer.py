@@ -150,6 +150,7 @@ class TransformerVelocityNetwork(nn.Module):
 
     Uses DiT-style adaLN-Zero conditioning and pairwise distance attention
     bias with Gaussian RBF expansion, following the SimpleFold architecture.
+    Supports arbitrary spatial dimensions via the spatial_dim parameter.
     """
 
     def __init__(
@@ -161,14 +162,16 @@ class TransformerVelocityNetwork(nn.Module):
         cutoff: float = 10.0,
         mlp_ratio: float = 4.0,
         atom_ordering: bool = False,
+        spatial_dim: int = 3,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.atom_ordering = atom_ordering
+        self.spatial_dim = spatial_dim
 
-        # Input: 3D coordinates → hidden_dim
-        self.input_proj = nn.Linear(3, hidden_dim)
+        # Input: D-dimensional coordinates → hidden_dim
+        self.input_proj = nn.Linear(spatial_dim, hidden_dim)
 
         # Pairwise distance bias: distances → RBF → MLP → per-head bias
         self.rbf = GaussianRBF(num_rbf, cutoff)
@@ -198,14 +201,14 @@ class TransformerVelocityNetwork(nn.Module):
             [DiTBlock(hidden_dim, num_heads, mlp_ratio, residual_scale=residual_scale) for _ in range(num_layers)]
         )
 
-        # Output: adaLN + projection → 3D velocity
-        self.final_layer = FinalLayer(hidden_dim, 3)
+        # Output: adaLN + projection → D-dimensional velocity
+        self.final_layer = FinalLayer(hidden_dim, spatial_dim)
 
     def _compute_pair_bias(self, positions: Tensor) -> Tensor:
         """Compute pairwise distance attention bias.
 
         Args:
-            positions: (batch, N, 3).
+            positions: (batch, N, D).
 
         Returns:
             Attention bias (batch, num_heads, N, N).
@@ -219,11 +222,11 @@ class TransformerVelocityNetwork(nn.Module):
         """Predict velocity field.
 
         Args:
-            positions: Atom positions (batch, N, 3).
+            positions: Atom positions (batch, N, D).
             t: Timestep (batch,).
 
         Returns:
-            Predicted velocity (batch, N, 3).
+            Predicted velocity (batch, N, D).
         """
         pair_bias = self._compute_pair_bias(positions)
         x = self.input_proj(positions)

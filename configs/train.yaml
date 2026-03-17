@@ -1,6 +1,6 @@
 defaults:
-  - data: hard_sphere_N10
-  - model: equiv_gnn
+  - data: multibody_23_N20_T1.0
+  - model: transformer
   - logging: logging
   - _self_
 

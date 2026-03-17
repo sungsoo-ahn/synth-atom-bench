@@ -126,8 +126,8 @@ def summarize_sweep(args):
             arch = config.get("model", {}).get("arch", "unknown")
             model_kwargs = config.get("model", {}).get("model_kwargs", {})
             lr = config.get("train", {}).get("lr", 0)
-            cr = data.get("best_clash_rate", float("inf"))
-            grd = data.get("best_gr_distance", float("inf"))
+            ew = data.get("best_energy_wasserstein",
+                          data.get("best_gr_distance", float("inf")))
             step = data.get("step", 0)
 
             # Estimate param count from model_kwargs
@@ -135,8 +135,7 @@ def summarize_sweep(args):
                 "run": run_name,
                 "arch": arch,
                 "lr": lr,
-                "best_clash_rate": cr,
-                "best_gr_distance": grd,
+                "best_energy_wasserstein": ew,
                 "step": step,
                 "model_kwargs": model_kwargs,
             })
@@ -148,22 +147,22 @@ def summarize_sweep(args):
         sys.exit(1)
 
     # Print summary table
-    results.sort(key=lambda r: (r["arch"], r["best_gr_distance"]))
-    print(f"\n{'Run':<35} {'Arch':<12} {'LR':<10} {'CR':<10} {'g(r) dist':<12} {'Step':<8}")
-    print("-" * 90)
+    results.sort(key=lambda r: (r["arch"], r["best_energy_wasserstein"]))
+    print(f"\n{'Run':<35} {'Arch':<12} {'LR':<10} {'Energy W1':<14} {'Step':<8}")
+    print("-" * 82)
     for r in results:
-        grd_str = f"{r['best_gr_distance']:.4f}" if r["best_gr_distance"] < float("inf") else "n/a"
-        print(f"{r['run']:<35} {r['arch']:<12} {r['lr']:<10.1e} {r['best_clash_rate']:<10.4f} {grd_str:<12} {r['step']:<8}")
+        ew_str = f"{r['best_energy_wasserstein']:.4f}" if r["best_energy_wasserstein"] < float("inf") else "n/a"
+        print(f"{r['run']:<35} {r['arch']:<12} {r['lr']:<10.1e} {ew_str:<14} {r['step']:<8}")
 
-    # Best per architecture (by g(r) distance)
+    # Best per architecture (by energy Wasserstein)
     print(f"\nBest per architecture:")
     print("-" * 60)
     seen = set()
     for r in results:
         if r["arch"] not in seen:
             seen.add(r["arch"])
-            grd_str = f"g(r)={r['best_gr_distance']:.4f}" if r["best_gr_distance"] < float("inf") else "g(r)=n/a"
-            print(f"  {r['arch']:<12} cr={r['best_clash_rate']:.4f} {grd_str} (lr={r['lr']:.1e})")
+            ew_str = f"energy_w1={r['best_energy_wasserstein']:.4f}" if r["best_energy_wasserstein"] < float("inf") else "energy_w1=n/a"
+            print(f"  {r['arch']:<12} {ew_str} (lr={r['lr']:.1e})")
 
     # Save summary JSON
     summary_path = os.path.join(sweep_dir, "summary.json")

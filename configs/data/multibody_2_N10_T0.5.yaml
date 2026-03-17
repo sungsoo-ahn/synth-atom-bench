@@ -1,0 +1,7 @@
+task: multibody
+preset: multibody_2
+data_dir: outputs/data/multibody_2_N10_T0.5
+n_atoms: 10
+temperature: 0.5
+k2: 1.0
+r0: 1.5

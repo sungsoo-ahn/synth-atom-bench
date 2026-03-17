@@ -1,4 +1,4 @@
-"""Oracle g(r) distance baseline: measures irreducible noise from finite samples."""
+"""Oracle energy Wasserstein baseline: measures irreducible noise from finite samples."""
 
 import argparse
 import json
@@ -6,17 +6,17 @@ import os
 import sys
 
 import numpy as np
+import torch
 
-from data.validate import pair_correlation
-from metrics.gr_distance import gr_distance
+from metrics.energy import energy_wasserstein, total_energy_batch
 
 
-def compute_oracle_gr_distance(
-    data_path: str, num_bins: int = 200, eval_samples: int | None = None,
+def compute_oracle_energy_wasserstein(
+    data_path: str, eval_samples: int | None = None,
 ) -> dict:
-    """Split training data in half, compute g(r) distance between halves.
+    """Split training data in half, compute energy Wasserstein between halves.
 
-    This measures the noise floor of the g(r) metric given finite samples.
+    This measures the noise floor of the energy Wasserstein metric given finite samples.
 
     Args:
         eval_samples: If set, subsample the "generated" half to this count
@@ -24,17 +24,26 @@ def compute_oracle_gr_distance(
             lower bound for the harness evaluation (#6).
 
     Returns:
-        Dict with keys: gr_distance, n_samples, n_reference, n_generated, box_size, radius
+        Dict with keys: energy_wasserstein, n_samples, n_reference, n_generated,
+        box_size, radius, preset, temperature
     """
     data = np.load(data_path)
     positions = data["positions"]
     box_size = float(data["box_size"])
     radius = float(data["radius"])
+    preset = str(data["preset"])
+    temperature = float(data["temperature"])
+    k2 = float(data["k2"])
+    r0 = float(data["r0"])
+    k3 = float(data["k3"])
+    theta0 = float(data["theta0"])
+    k4 = float(data["k4"])
+    phi0 = float(data["phi0"])
     n_samples = positions.shape[0]
 
     # Split in half
     mid = n_samples // 2
-    half_a = positions[:mid]  # reference (like full training set for g(r))
+    half_a = positions[:mid]
     half_b = positions[mid : mid + mid]
 
     # Subsample half_b to match eval sample count if specified
@@ -45,24 +54,34 @@ def compute_oracle_gr_distance(
         half_b = half_b[idx]
         n_generated = eval_samples
 
-    # Compute g(r) on reference half, measure distance using "generated" half
-    r_a, g_r_a = pair_correlation(half_a, box_size, num_bins=num_bins)
-    grd = gr_distance(half_b, r_a, g_r_a, box_size, num_bins=num_bins)
+    # Compute total energy for both halves
+    half_a_t = torch.from_numpy(half_a).float()
+    half_b_t = torch.from_numpy(half_b).float()
+
+    energies_a = total_energy_batch(
+        half_a_t, preset=preset, k2=k2, r0=r0, k3=k3, theta0=theta0, k4=k4, phi0=phi0,
+    )
+    energies_b = total_energy_batch(
+        half_b_t, preset=preset, k2=k2, r0=r0, k3=k3, theta0=theta0, k4=k4, phi0=phi0,
+    )
+
+    ew = energy_wasserstein(energies_b, energies_a)
 
     return {
-        "gr_distance": round(grd, 6),
+        "energy_wasserstein": round(ew, 6),
         "n_samples": n_samples,
         "n_reference": mid,
         "n_generated": n_generated,
         "box_size": box_size,
         "radius": radius,
+        "preset": preset,
+        "temperature": temperature,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute oracle g(r) distance baseline")
-    parser.add_argument("--data", required=True, help="Data config name (e.g. hard_sphere_N50)")
-    parser.add_argument("--num_bins", type=int, default=200)
+    parser = argparse.ArgumentParser(description="Compute oracle energy Wasserstein baseline")
+    parser.add_argument("--data", required=True, help="Data config name (e.g. multibody_23_N50_T1.0)")
     parser.add_argument("--eval_samples", type=int, default=2000,
                         help="Subsample size to match evaluation (default: 2000)")
     args = parser.parse_args()
@@ -82,10 +101,10 @@ def main():
         sys.exit(1)
 
     print(f"Computing oracle baseline for {args.data}...", file=sys.stderr)
-    result = compute_oracle_gr_distance(
-        data_path, num_bins=args.num_bins, eval_samples=args.eval_samples,
+    result = compute_oracle_energy_wasserstein(
+        data_path, eval_samples=args.eval_samples,
     )
-    print(f"  Oracle g(r) distance: {result['gr_distance']}", file=sys.stderr)
+    print(f"  Oracle energy Wasserstein: {result['energy_wasserstein']}", file=sys.stderr)
     print(f"  Reference samples: {result['n_reference']}, generated samples: {result['n_generated']}", file=sys.stderr)
 
     # Cache result

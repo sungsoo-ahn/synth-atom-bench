@@ -293,8 +293,8 @@ def collect_results(args):
     """Walk scaling directory, load latest.pt from each run, save results.json.
 
     Uses latest.pt because it tracks the running-best metrics across all
-    evaluation steps.  best.pt only saves weights when g(r) distance improves,
-    so its best_clash_rate may miss better values achieved at other steps.
+    evaluation steps.  best.pt only saves weights when energy_wasserstein
+    improves, so its metric may miss better values achieved at other steps.
     """
     scaling_dir = args.scaling_dir
     if not os.path.isdir(scaling_dir):
@@ -338,10 +338,10 @@ def collect_results(args):
             gm = grid_meta.get(run_name, {})
             budget = gm.get("budget", 0) or config.get("train", {}).get("budget", 0) or 0
             max_steps = config.get("train", {}).get("max_steps", 0)
-            cr = data.get("best_clash_rate", float("inf"))
-            grd = data.get("best_gr_distance", float("inf"))
-            bvr = data.get("best_bond_violation_rate", float("inf"))
-            ncr = data.get("best_nonbonded_clash_rate", float("inf"))
+            # Read energy_wasserstein, with fallback to best_gr_distance for old checkpoints
+            ew = data.get("best_energy_wasserstein", None)
+            if ew is None:
+                ew = data.get("best_gr_distance", float("inf"))
             step = data.get("step", 0)
 
             # Count params (cached)
@@ -360,38 +360,33 @@ def collect_results(args):
                 "size": size,
                 "lr": lr,
                 "budget": float(budget),
-                "best_clash_rate": cr,
-                "best_gr_distance": grd,
+                "best_energy_wasserstein": ew,
                 "step": step,
                 "n_params": n_params,
                 "flops_per_step": flops_per_step,
                 "total_flops": total_flops,
                 "model_kwargs": model_kwargs,
             }
-            if bvr < float("inf"):
-                result_entry["best_bond_violation_rate"] = bvr
-            if ncr < float("inf"):
-                result_entry["best_nonbonded_clash_rate"] = ncr
             results.append(result_entry)
         except Exception as e:
-            print(f"Warning: failed to load {best_pt}: {e}", file=sys.stderr)
+            print(f"Warning: failed to load {ckpt_path}: {e}", file=sys.stderr)
 
     if not results:
         print("No results found.", file=sys.stderr)
         sys.exit(1)
 
     # Print all results
-    results.sort(key=lambda r: (r["arch"], r["budget"], r["best_gr_distance"]))
-    print(f"\n{'Run':<45} {'Arch':<12} {'Size':<6} {'LR':<8} {'Budget':>10} {'CR':>8} {'g(r)':>8} {'Step':>8}")
-    print("-" * 110)
+    results.sort(key=lambda r: (r["arch"], r["budget"], r["best_energy_wasserstein"]))
+    print(f"\n{'Run':<45} {'Arch':<12} {'Size':<6} {'LR':<8} {'Budget':>10} {'E-W1':>10} {'Step':>8}")
+    print("-" * 105)
     for r in results:
-        grd_str = f"{r['best_gr_distance']:>8.4f}" if r["best_gr_distance"] < float("inf") else "     n/a"
+        ew_str = f"{r['best_energy_wasserstein']:>10.4f}" if r["best_energy_wasserstein"] < float("inf") else "       n/a"
         print(
             f"{r['run']:<45} {r['arch']:<12} {r['size']:<6} {r['lr']:<8.0e} "
-            f"{r['budget']:>10.0e} {r['best_clash_rate']:>8.4f} {grd_str} {r['step']:>8}"
+            f"{r['budget']:>10.0e} {ew_str} {r['step']:>8}"
         )
 
-    # Best per (arch, budget): select by lowest clash rate (primary), fall back to g(r) distance
+    # Best per (arch, budget): select by lowest energy_wasserstein
     best_per_budget = {}
     for r in results:
         key = (r["arch"], r["budget"])
@@ -399,20 +394,18 @@ def collect_results(args):
             best_per_budget[key] = r
         else:
             prev = best_per_budget[key]
-            if r["best_clash_rate"] < prev["best_clash_rate"]:
-                best_per_budget[key] = r
-            elif r["best_clash_rate"] == prev["best_clash_rate"] and r["best_gr_distance"] < prev["best_gr_distance"]:
+            if r["best_energy_wasserstein"] < prev["best_energy_wasserstein"]:
                 best_per_budget[key] = r
 
     print(f"\nBest per (architecture, budget):")
-    print("-" * 95)
-    print(f"{'Arch':<12} {'Budget':>10} {'Best CR':>10} {'Best g(r)':>10} {'Size':<6} {'LR':<8} {'Params':>10}")
-    print("-" * 95)
+    print("-" * 90)
+    print(f"{'Arch':<12} {'Budget':>10} {'Best E-W1':>12} {'Size':<6} {'LR':<8} {'Params':>10}")
+    print("-" * 90)
     for (arch, budget), r in sorted(best_per_budget.items()):
-        grd_str = f"{r['best_gr_distance']:>10.4f}" if r["best_gr_distance"] < float("inf") else "       n/a"
+        ew_str = f"{r['best_energy_wasserstein']:>12.4f}" if r["best_energy_wasserstein"] < float("inf") else "         n/a"
         print(
-            f"{arch:<12} {budget:>10.0e} {r['best_clash_rate']:>10.4f} "
-            f"{grd_str} {r['size']:<6} {r['lr']:<8.0e} {r['n_params']:>10,}"
+            f"{arch:<12} {budget:>10.0e} "
+            f"{ew_str} {r['size']:<6} {r['lr']:<8.0e} {r['n_params']:>10,}"
         )
 
     # Save results
@@ -458,128 +451,46 @@ def fit_scaling(args):
             continue
         arch = r["arch"]
         if arch not in arch_data:
-            arch_data[arch] = {
-                "flops": [], "clash_rate": [], "gr_distance": [],
-                "bond_violation_rate": [], "nonbonded_clash_rate": [],
-            }
+            arch_data[arch] = {"flops": [], "energy_wasserstein": []}
         arch_data[arch]["flops"].append(r["budget"])
-        arch_data[arch]["clash_rate"].append(r["best_clash_rate"])
-        arch_data[arch]["gr_distance"].append(r.get("best_gr_distance", float("inf")))
-        arch_data[arch]["bond_violation_rate"].append(r.get("best_bond_violation_rate", float("inf")))
-        arch_data[arch]["nonbonded_clash_rate"].append(r.get("best_nonbonded_clash_rate", float("inf")))
+        arch_data[arch]["energy_wasserstein"].append(r.get("best_energy_wasserstein", float("inf")))
 
-    # Sort by budget within each arch; clip clash_rate floor at 1/n_eval_samples
-    eval_floor = 1.0 / 1000  # n_eval_samples from configs/train.yaml
+    # Sort by budget within each arch
     for arch in arch_data:
         order = np.argsort(arch_data[arch]["flops"])
         arch_data[arch]["flops"] = np.array(arch_data[arch]["flops"])[order]
-        arch_data[arch]["clash_rate"] = np.clip(
-            np.array(arch_data[arch]["clash_rate"])[order], eval_floor, None
-        )
-        arch_data[arch]["gr_distance"] = np.array(arch_data[arch]["gr_distance"])[order]
-        arch_data[arch]["bond_violation_rate"] = np.array(arch_data[arch]["bond_violation_rate"])[order]
-        arch_data[arch]["nonbonded_clash_rate"] = np.array(arch_data[arch]["nonbonded_clash_rate"])[order]
+        arch_data[arch]["energy_wasserstein"] = np.array(arch_data[arch]["energy_wasserstein"])[order]
 
     # Capitalize arch names for plotting (matches ARCH_COLORS keys)
     arch_name_map = ARCH_DISPLAY_NAMES
     plot_data = {}
     for arch, d in arch_data.items():
         display_name = arch_name_map.get(arch, arch)
-        plot_data[display_name] = d
+        # plot_scaling_curves expects 'metric' key for y-axis data
+        plot_data[display_name] = {
+            "flops": d["flops"],
+            "metric": d["energy_wasserstein"],
+        }
 
     # Fit and report
-    print("\nScaling Law Fits:")
+    print("\nScaling Law Fits (energy Wasserstein-1):")
     print("=" * 60)
     print(f"{'Architecture':<15} {'alpha':>8} {'prefactor':>12} {'floor':>10}")
     print("-" * 60)
     fits = {}
     for arch, d in arch_data.items():
         flops = np.array(d["flops"], dtype=float)
-        cr = np.array(d["clash_rate"], dtype=float)
-        if len(flops) < 3:
-            print(f"{arch:<15} insufficient data ({len(flops)} points)", file=sys.stderr)
+        ew = np.array(d["energy_wasserstein"], dtype=float)
+        valid = np.isfinite(ew)
+        if valid.sum() < 3:
+            print(f"{arch:<15} insufficient data ({valid.sum()} points)", file=sys.stderr)
             continue
         try:
-            a, alpha, floor = fit_scaling_law(flops, cr)
+            a, alpha, floor = fit_scaling_law(flops[valid], ew[valid])
             fits[arch] = {"a": a, "alpha": alpha, "floor": floor}
             print(f"{arch:<15} {alpha:>8.3f} {a:>12.4f} {floor:>10.5f}")
         except RuntimeError as e:
             print(f"{arch:<15} fit failed: {e}", file=sys.stderr)
-
-    # Fit g(r) distance scaling laws
-    has_gr = any(
-        np.isfinite(d["gr_distance"]).any() for d in arch_data.values()
-    )
-    gr_fits = {}
-    if has_gr:
-        print("\nScaling Law Fits (g(r) distance):")
-        print("=" * 60)
-        print(f"{'Architecture':<15} {'alpha':>8} {'prefactor':>12} {'floor':>10}")
-        print("-" * 60)
-        for arch, d in arch_data.items():
-            flops = np.array(d["flops"], dtype=float)
-            grd = np.array(d["gr_distance"], dtype=float)
-            valid = np.isfinite(grd)
-            if valid.sum() < 3:
-                print(f"{arch:<15} insufficient data ({valid.sum()} finite points)", file=sys.stderr)
-                continue
-            try:
-                a, alpha, floor = fit_scaling_law(flops[valid], grd[valid])
-                gr_fits[arch] = {"a": a, "alpha": alpha, "floor": floor}
-                print(f"{arch:<15} {alpha:>8.3f} {a:>12.4f} {floor:>10.5f}")
-            except RuntimeError as e:
-                print(f"{arch:<15} fit failed: {e}", file=sys.stderr)
-        fits["gr_distance"] = gr_fits
-
-    # Fit chain-specific scaling laws (bond violation rate)
-    has_bvr = any(
-        np.isfinite(d["bond_violation_rate"]).any() for d in arch_data.values()
-    )
-    bvr_fits = {}
-    if has_bvr:
-        print("\nScaling Law Fits (bond violation rate):")
-        print("=" * 60)
-        print(f"{'Architecture':<15} {'alpha':>8} {'prefactor':>12} {'floor':>10}")
-        print("-" * 60)
-        for arch, d in arch_data.items():
-            flops = np.array(d["flops"], dtype=float)
-            bvr = np.array(d["bond_violation_rate"], dtype=float)
-            valid = np.isfinite(bvr)
-            if valid.sum() < 3:
-                print(f"{arch:<15} insufficient data ({valid.sum()} finite points)", file=sys.stderr)
-                continue
-            try:
-                a, alpha, floor = fit_scaling_law(flops[valid], bvr[valid])
-                bvr_fits[arch] = {"a": a, "alpha": alpha, "floor": floor}
-                print(f"{arch:<15} {alpha:>8.3f} {a:>12.4f} {floor:>10.5f}")
-            except RuntimeError as e:
-                print(f"{arch:<15} fit failed: {e}", file=sys.stderr)
-        fits["bond_violation_rate"] = bvr_fits
-
-    # Fit chain-specific scaling laws (nonbonded clash rate)
-    has_ncr = any(
-        np.isfinite(d["nonbonded_clash_rate"]).any() for d in arch_data.values()
-    )
-    ncr_fits = {}
-    if has_ncr:
-        print("\nScaling Law Fits (nonbonded clash rate):")
-        print("=" * 60)
-        print(f"{'Architecture':<15} {'alpha':>8} {'prefactor':>12} {'floor':>10}")
-        print("-" * 60)
-        for arch, d in arch_data.items():
-            flops = np.array(d["flops"], dtype=float)
-            ncr = np.array(d["nonbonded_clash_rate"], dtype=float)
-            valid = np.isfinite(ncr)
-            if valid.sum() < 3:
-                print(f"{arch:<15} insufficient data ({valid.sum()} finite points)", file=sys.stderr)
-                continue
-            try:
-                a, alpha, floor = fit_scaling_law(flops[valid], ncr[valid])
-                ncr_fits[arch] = {"a": a, "alpha": alpha, "floor": floor}
-                print(f"{arch:<15} {alpha:>8.3f} {a:>12.4f} {floor:>10.5f}")
-            except RuntimeError as e:
-                print(f"{arch:<15} fit failed: {e}", file=sys.stderr)
-        fits["nonbonded_clash_rate"] = ncr_fits
 
     # Save fits
     fits_path = os.path.join(scaling_dir, "scaling_fits.json")
@@ -587,67 +498,16 @@ def fit_scaling(args):
         json.dump(fits, f, indent=2)
     print(f"\nFits saved to {fits_path}")
 
-    # Plot 1: Scaling curves (clash rate)
+    # Plot: Scaling curves (energy Wasserstein-1)
     plots_dir = "outputs/plots"
     os.makedirs(plots_dir, exist_ok=True)
 
     with synthbench_style():
-        fig = plot_scaling_curves(plot_data, fit_curves=True)
+        fig = plot_scaling_curves(plot_data, fit_curves=True, ylabel="Energy Wasserstein-1")
         save_figure(fig, os.path.join(plots_dir, "scaling_curves"))
         print(f"Saved {plots_dir}/scaling_curves.png")
 
-    # Plot 1b: Scaling curves (g(r) distance)
-    if has_gr:
-        gr_plot_data = {}
-        for arch, d in arch_data.items():
-            valid = np.isfinite(d["gr_distance"])
-            if valid.any():
-                display_name = arch_name_map.get(arch, arch)
-                gr_plot_data[display_name] = {
-                    "flops": d["flops"][valid],
-                    "clash_rate": d["gr_distance"][valid],  # reuse clash_rate key for plot_scaling_curves
-                }
-        if gr_plot_data:
-            with synthbench_style():
-                fig = plot_scaling_curves(gr_plot_data, fit_curves=True, ylabel="g(r) L1 distance")
-                save_figure(fig, os.path.join(plots_dir, "scaling_curves_gr_distance"))
-                print(f"Saved {plots_dir}/scaling_curves_gr_distance.png")
-
-    # Plot 1c: Scaling curves (bond violation rate)
-    if has_bvr:
-        bvr_plot_data = {}
-        for arch, d in arch_data.items():
-            valid = np.isfinite(d["bond_violation_rate"])
-            if valid.any():
-                display_name = arch_name_map.get(arch, arch)
-                bvr_plot_data[display_name] = {
-                    "flops": d["flops"][valid],
-                    "clash_rate": d["bond_violation_rate"][valid],
-                }
-        if bvr_plot_data:
-            with synthbench_style():
-                fig = plot_scaling_curves(bvr_plot_data, fit_curves=True, ylabel="Bond violation rate")
-                save_figure(fig, os.path.join(plots_dir, "scaling_curves_bond_violation"))
-                print(f"Saved {plots_dir}/scaling_curves_bond_violation.png")
-
-    # Plot 1d: Scaling curves (nonbonded clash rate)
-    if has_ncr:
-        ncr_plot_data = {}
-        for arch, d in arch_data.items():
-            valid = np.isfinite(d["nonbonded_clash_rate"])
-            if valid.any():
-                display_name = arch_name_map.get(arch, arch)
-                ncr_plot_data[display_name] = {
-                    "flops": d["flops"][valid],
-                    "clash_rate": d["nonbonded_clash_rate"][valid],
-                }
-        if ncr_plot_data:
-            with synthbench_style():
-                fig = plot_scaling_curves(ncr_plot_data, fit_curves=True, ylabel="Non-bonded clash rate")
-                save_figure(fig, os.path.join(plots_dir, "scaling_curves_nonbonded_clash"))
-                print(f"Saved {plots_dir}/scaling_curves_nonbonded_clash.png")
-
-    # Plot 2: Isoflop profiles (clash_rate vs model_size at each budget)
+    # Plot: Isoflop profiles (energy_wasserstein vs model_size at each budget)
     all_results = data["all_results"]
     budgets_seen = sorted(set(r["budget"] for r in all_results if r["budget"] > 0))
     archs_seen = sorted(set(r["arch"] for r in all_results))
@@ -679,23 +539,23 @@ def fit_scaling(args):
                     best_by_size = {}
                     for r in runs:
                         s = r["size"]
-                        if s not in best_by_size or r["best_clash_rate"] < best_by_size[s]["best_clash_rate"]:
+                        if s not in best_by_size or r["best_energy_wasserstein"] < best_by_size[s]["best_energy_wasserstein"]:
                             best_by_size[s] = r
 
                     # Sort by size order
                     sizes_present = [s for s in size_order if s in best_by_size]
                     params = [best_by_size[s]["n_params"] for s in sizes_present]
-                    crs = [best_by_size[s]["best_clash_rate"] for s in sizes_present]
+                    ews = [best_by_size[s]["best_energy_wasserstein"] for s in sizes_present]
 
                     display_name = arch_name_map.get(arch, arch)
                     color = ARCH_COLORS.get(display_name, "gray")
                     marker = ARCH_MARKERS.get(display_name, "x")
-                    ax.plot(params, crs, marker=marker, color=color, label=display_name)
+                    ax.plot(params, ews, marker=marker, color=color, label=display_name)
 
                 ax.set_xscale("log")
                 ax.set_yscale("log")
                 ax.set_xlabel("Parameters")
-                ax.set_ylabel("Clash rate")
+                ax.set_ylabel("Energy Wasserstein-1")
                 ax.set_title(f"Budget = {budget:.0e} FLOPs")
                 if idx == 0:
                     ax.legend(frameon=False, fontsize=8)
@@ -722,7 +582,7 @@ def main():
     common.add_argument("--budgets", default=None, help="Comma-separated FLOP budgets")
     common.add_argument("--batch_size", type=int, default=256, help="Batch size for FLOPs measurement")
     common.add_argument("--n_atoms", type=int, default=10, help="Number of atoms (auto-detected if --data set)")
-    common.add_argument("--data", default=None, help="Hydra data config name (e.g. hard_sphere_N10)")
+    common.add_argument("--data", default=None, help="Hydra data config name (e.g. multibody_23_N20_T1.0)")
     common.add_argument("--n_gpus", type=int, default=1, help="Number of GPUs for parallel execution")
 
     # Subcommands

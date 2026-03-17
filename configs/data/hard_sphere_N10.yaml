@@ -1,5 +1,0 @@
-task: hard_sphere
-data_dir: outputs/data/hard_sphere_N10
-n_atoms: 10
-eta: 0.3
-radius: 0.5

@@ -40,12 +40,9 @@ def log(msg: str):
 # ── Stage 1: Data check / generation ──────────────────────────────────────────
 
 
-def ensure_data(task_name: str, n_atoms: int, data_dir: str, eta: float = 0.3):
+def ensure_data(task_name: str, n_atoms: int, data_dir: str):
     """Generate train/val/test data if it doesn't exist."""
     task = TASK_REGISTRY[task_name]()
-    # For HardSphereTask, pass eta
-    if hasattr(task, "eta"):
-        task.eta = eta
 
     all_exist = all(
         os.path.isfile(os.path.join(data_dir, f"{split}.npz"))
@@ -76,14 +73,15 @@ def ensure_data(task_name: str, n_atoms: int, data_dir: str, eta: float = 0.3):
 
 
 def compute_baseline(data_name: str, data_dir: str) -> float | None:
-    """Compute oracle g(r) distance using autoresearch/baseline.py."""
+    """Compute oracle energy Wasserstein distance using autoresearch/baseline.py."""
     cache_path = "outputs/autoresearch/baselines.json"
     if os.path.isfile(cache_path):
         with open(cache_path) as f:
             baselines = json.load(f)
         if data_name in baselines:
-            log(f"Oracle baseline (cached): {baselines[data_name]['gr_distance']}")
-            return baselines[data_name]["gr_distance"]
+            val = baselines[data_name].get("energy_wasserstein", baselines[data_name].get("gr_distance"))
+            log(f"Oracle baseline (cached): {val}")
+            return val
 
     log("Computing oracle baseline...")
     result = subprocess.run(
@@ -99,8 +97,9 @@ def compute_baseline(data_name: str, data_dir: str) -> float | None:
         if line.strip().startswith("{"):
             try:
                 data = json.loads(line)
-                log(f"Oracle baseline: {data.get('gr_distance')}")
-                return data.get("gr_distance")
+                val = data.get("energy_wasserstein", data.get("gr_distance"))
+                log(f"Oracle baseline: {val}")
+                return val
             except json.JSONDecodeError:
                 pass
 
@@ -109,7 +108,7 @@ def compute_baseline(data_name: str, data_dir: str) -> float | None:
         with open(cache_path) as f:
             baselines = json.load(f)
         if data_name in baselines:
-            return baselines[data_name]["gr_distance"]
+            return baselines[data_name].get("energy_wasserstein", baselines[data_name].get("gr_distance"))
 
     return None
 
@@ -347,8 +346,8 @@ def collect_results(scaling_dir: str, jobs: list[dict]) -> dict:
             size = config.get("model", {}).get("size", "unknown")
             lr = config.get("train", {}).get("lr", 0)
             step = data.get("step", 0)
-            cr = data.get("best_clash_rate", float("inf"))
-            grd = data.get("best_gr_distance", float("inf"))
+            # Read energy_wasserstein, with fallback to gr_distance for old checkpoints
+            ew = data.get("best_energy_wasserstein", data.get("best_gr_distance", float("inf")))
 
             meta = job_meta.get(run_name, {})
             budget = meta.get("budget", 0)
@@ -360,8 +359,7 @@ def collect_results(scaling_dir: str, jobs: list[dict]) -> dict:
                 "size": size,
                 "lr": lr,
                 "budget": budget,
-                "best_clash_rate": cr,
-                "best_gr_distance": grd,
+                "best_energy_wasserstein": ew,
                 "step": step,
                 "flops_per_step": flops_per_step,
                 "total_flops": flops_per_step * step,
@@ -381,7 +379,7 @@ def collect_results(scaling_dir: str, jobs: list[dict]) -> dict:
             best_per_budget[key] = r
         else:
             prev = best_per_budget[key]
-            if r["best_gr_distance"] < prev["best_gr_distance"]:
+            if r["best_energy_wasserstein"] < prev["best_energy_wasserstein"]:
                 best_per_budget[key] = r
 
     log(f"Collected {len(results)} results, {len(best_per_budget)} unique (arch, budget) pairs")
@@ -424,49 +422,32 @@ def fit_and_plot(
             continue
         arch = r["arch"]
         if arch not in arch_data:
-            arch_data[arch] = {"flops": [], "clash_rate": [], "gr_distance": []}
+            arch_data[arch] = {"flops": [], "energy_wasserstein": []}
         arch_data[arch]["flops"].append(r["budget"])
-        arch_data[arch]["clash_rate"].append(r["best_clash_rate"])
-        arch_data[arch]["gr_distance"].append(r.get("best_gr_distance", float("inf")))
+        arch_data[arch]["energy_wasserstein"].append(r["best_energy_wasserstein"])
 
     # Sort by budget
     for arch in arch_data:
         order = np.argsort(arch_data[arch]["flops"])
         arch_data[arch]["flops"] = np.array(arch_data[arch]["flops"])[order]
-        arch_data[arch]["clash_rate"] = np.array(arch_data[arch]["clash_rate"])[order]
-        arch_data[arch]["gr_distance"] = np.array(arch_data[arch]["gr_distance"])[order]
+        arch_data[arch]["energy_wasserstein"] = np.array(arch_data[arch]["energy_wasserstein"])[order]
 
     plots_dir = os.path.join(scaling_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
     # Fit and report
     fits = {}
-    log("\nScaling Law Fits (clash_rate):")
+    log("\nScaling Law Fits (energy_wasserstein):")
     log(f"  {'Architecture':<15} {'alpha':>8} {'prefactor':>12} {'floor':>10}")
     for arch, d in arch_data.items():
         flops = d["flops"]
-        cr = d["clash_rate"]
-        if len(flops) < 3:
-            continue
-        try:
-            a, alpha, floor = fit_scaling_law(flops, cr)
-            fits[f"{arch}_clash_rate"] = {"a": a, "alpha": alpha, "floor": floor}
-            log(f"  {arch:<15} {alpha:>8.3f} {a:>12.4f} {floor:>10.5f}")
-        except Exception as e:
-            log(f"  {arch:<15} fit failed: {e}")
-
-    # Fit g(r) distance
-    log("\nScaling Law Fits (gr_distance):")
-    log(f"  {'Architecture':<15} {'alpha':>8} {'prefactor':>12} {'floor':>10}")
-    for arch, d in arch_data.items():
-        flops = d["flops"]
-        grd = d["gr_distance"]
-        valid = np.isfinite(grd)
+        ew = d["energy_wasserstein"]
+        valid = np.isfinite(ew)
         if valid.sum() < 3:
             continue
         try:
-            a, alpha, floor = fit_scaling_law(flops[valid], grd[valid])
-            fits[f"{arch}_gr_distance"] = {"a": a, "alpha": alpha, "floor": floor}
+            a, alpha, floor = fit_scaling_law(flops[valid], ew[valid])
+            fits[f"{arch}_energy_wasserstein"] = {"a": a, "alpha": alpha, "floor": floor}
             log(f"  {arch:<15} {alpha:>8.3f} {a:>12.4f} {floor:>10.5f}")
         except Exception as e:
             log(f"  {arch:<15} fit failed: {e}")
@@ -476,43 +457,27 @@ def fit_and_plot(
     with open(fits_path, "w") as f:
         json.dump(fits, f, indent=2)
 
-    # Plot clash_rate scaling curves
+    # Plot energy_wasserstein scaling curves
     plot_data = {}
     for arch, d in arch_data.items():
-        display_name = ARCH_DISPLAY_NAMES.get(arch, arch)
-        plot_data[display_name] = d
-
-    with synthbench_style():
-        fig = plot_scaling_curves(plot_data, fit_curves=True)
-        if oracle_baseline is not None:
-            ax = fig.get_axes()[0]
-            ax.axhline(oracle_baseline, color="#3498db", linestyle="--", alpha=0.5,
-                       label=f"Oracle baseline ({oracle_baseline:.4f})")
-            ax.legend(frameon=False)
-        save_figure(fig, os.path.join(plots_dir, "scaling_clash_rate"))
-        log(f"Saved {plots_dir}/scaling_clash_rate.png")
-
-    # Plot g(r) distance scaling curves
-    gr_plot_data = {}
-    for arch, d in arch_data.items():
-        valid = np.isfinite(d["gr_distance"])
+        valid = np.isfinite(d["energy_wasserstein"])
         if valid.any():
             display_name = ARCH_DISPLAY_NAMES.get(arch, arch)
-            gr_plot_data[display_name] = {
+            plot_data[display_name] = {
                 "flops": d["flops"][valid],
-                "clash_rate": d["gr_distance"][valid],
+                "metric": d["energy_wasserstein"][valid],
             }
 
-    if gr_plot_data:
+    if plot_data:
         with synthbench_style():
-            fig = plot_scaling_curves(gr_plot_data, fit_curves=True, ylabel="g(r) L1 distance")
+            fig = plot_scaling_curves(plot_data, fit_curves=True, ylabel="Energy Wasserstein distance")
             if oracle_baseline is not None:
                 ax = fig.get_axes()[0]
                 ax.axhline(oracle_baseline, color="#3498db", linestyle="--", alpha=0.5,
                            label=f"Oracle baseline ({oracle_baseline:.4f})")
                 ax.legend(frameon=False)
-            save_figure(fig, os.path.join(plots_dir, "scaling_gr_distance"))
-            log(f"Saved {plots_dir}/scaling_gr_distance.png")
+            save_figure(fig, os.path.join(plots_dir, "scaling_energy_wasserstein"))
+            log(f"Saved {plots_dir}/scaling_energy_wasserstein.png")
 
     return fits
 
@@ -527,7 +492,7 @@ def generate_report(
     report_lines = ["# Scaling Law Report", ""]
 
     if oracle_baseline is not None:
-        report_lines.append(f"Oracle g(r) baseline: {oracle_baseline:.6f}")
+        report_lines.append(f"Oracle energy Wasserstein baseline: {oracle_baseline:.6f}")
         report_lines.append("")
 
     # Best results per architecture
@@ -535,13 +500,14 @@ def generate_report(
     if best_per_budget:
         report_lines.append("## Best Results per (Architecture, Budget)")
         report_lines.append("")
-        report_lines.append(f"{'Arch':<12} {'Budget':>10} {'CR':>10} {'g(r)':>10} {'Size':<6}")
-        report_lines.append("-" * 55)
+        report_lines.append(f"{'Arch':<12} {'Budget':>10} {'E-Wass':>12} {'Size':<6}")
+        report_lines.append("-" * 45)
         for key in sorted(best_per_budget.keys()):
             r = best_per_budget[key]
-            grd_str = f"{r['best_gr_distance']:>10.4f}" if r["best_gr_distance"] < float("inf") else "       n/a"
+            ew = r["best_energy_wasserstein"]
+            ew_str = f"{ew:>12.4f}" if ew < float("inf") else "         n/a"
             report_lines.append(
-                f"{r['arch']:<12} {r['budget']:>10.0e} {r['best_clash_rate']:>10.4f} {grd_str} {r['size']:<6}"
+                f"{r['arch']:<12} {r['budget']:>10.0e} {ew_str} {r['size']:<6}"
             )
         report_lines.append("")
 
@@ -568,11 +534,13 @@ def generate_report(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fully automated scaling law pipeline")
-    parser.add_argument("--task", default="hard_sphere", choices=list(TASK_REGISTRY.keys()))
+    parser = argparse.ArgumentParser(
+        description="Fully automated scaling law pipeline",
+        epilog="Example: uv run python experiments/scaling_auto.py --task multibody --n_atoms 50 --archs transformer",
+    )
+    parser.add_argument("--task", default="multibody", choices=list(TASK_REGISTRY.keys()))
     parser.add_argument("--n_atoms", type=int, default=50)
-    parser.add_argument("--eta", type=float, default=0.3, help="Packing fraction (hard_sphere only)")
-    parser.add_argument("--archs", default="equiv_gnn,transformer,pairformer")
+    parser.add_argument("--archs", default="transformer")
     parser.add_argument("--budgets", default=None, help="Comma-separated FLOP budgets")
     parser.add_argument("--sizes", default=None, help="Comma-separated sizes (default: all)")
     parser.add_argument("--lrs", default=None, help="Comma-separated learning rates")
@@ -598,7 +566,7 @@ def main():
 
     # Stage 1: Data
     log("\n=== Stage 1: Data check/generation ===")
-    ensure_data(args.task, args.n_atoms, data_dir, eta=args.eta)
+    ensure_data(args.task, args.n_atoms, data_dir)
 
     # Stage 2: Oracle baseline
     log("\n=== Stage 2: Oracle baseline ===")

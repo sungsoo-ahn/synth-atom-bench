@@ -25,15 +25,12 @@ import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
-from data.validate import pair_correlation
 from experiments.checkpointing import CheckpointManager
 from experiments.logger import ComputeTracker, Logger, LoggerConfig
 from experiments.model_registry import MODEL_REGISTRY, SIZE_PRESETS
 from experiments.tasks import get_task
 from flow_matching.sampling import sample_batched
 from flow_matching.training import flow_matching_loss
-from metrics.clash_rate import clash_rate_batched
-from metrics.gr_distance import gr_distance
 
 
 def random_rotation_matrix(device: torch.device) -> torch.Tensor:
@@ -102,16 +99,11 @@ def evaluate(
     cfg: DictConfig,
     device: torch.device,
     task,
-    gt_r: "np.ndarray | None" = None,
-    gt_g_r: "np.ndarray | None" = None,
 ) -> dict:
-    """Generate samples and compute metrics.
+    """Generate samples and compute energy metrics.
 
-    Returns dict with keys: clash_rate, gr_distance, samples,
-    plus any task-specific metrics.
+    Returns dict with keys: energy_wasserstein, mean_energy_ratio, samples.
     """
-    import numpy as np
-
     model.eval()
     samples = sample_batched(
         model,
@@ -123,27 +115,21 @@ def evaluate(
     )
     # Shift back to [0, box_size]
     samples = samples + dataset.box_size / 2
-    cr = clash_rate_batched(samples, dataset.radius)
-    grd = float("inf")
-    if gt_r is not None and gt_g_r is not None:
-        grd = gr_distance(samples.numpy(), gt_r, gt_g_r, dataset.box_size)
 
-    result = {"clash_rate": cr, "gr_distance": grd, "samples": samples}
+    result = {"samples": samples}
     result.update(task.compute_metrics(samples, dataset))
 
     model.train()
     return result
 
 
-def _format_eval_msg(step: int | str, ev: dict, best_grd: float) -> str:
+def _format_eval_msg(step: int | str, ev: dict, best_ew: float) -> str:
     """Format evaluation results into a log message."""
-    parts = [f"Step {step:>6s}" if isinstance(step, str) else f"Step {step:6d}",
-             f"Eval clash rate: {ev['clash_rate']:.4f}",
-             f"g(r) dist: {ev['gr_distance']:.4f}"]
+    parts = [f"Step {step:>6s}" if isinstance(step, str) else f"Step {step:6d}"]
     for k, v in ev.items():
-        if k not in ("clash_rate", "gr_distance", "samples"):
+        if k != "samples":
             parts.append(f"{k}: {v:.4f}")
-    parts.append(f"Best g(r): {best_grd:.4f}")
+    parts.append(f"Best E-W1: {best_ew:.4f}")
     return "  " + " | ".join(parts)
 
 
@@ -186,10 +172,6 @@ def main(cfg: DictConfig) -> None:
     box_size = dataset.box_size
     n_atoms = dataset.positions.shape[1]
     print(f"Dataset: {len(dataset)} samples, {task.describe_data(dataset)}")
-
-    # Precompute ground-truth g(r) for evaluation metric
-    print("Precomputing ground-truth g(r)...")
-    gt_r, gt_g_r = pair_correlation(dataset.positions.numpy(), box_size)
 
     # Center positions for flow matching (noise is N(0,I))
     dataset.positions = dataset.positions - box_size / 2
@@ -323,54 +305,39 @@ def main(cfg: DictConfig) -> None:
 
         # Evaluate + checkpoint
         if step % cfg.eval.every_n_steps == 0:
-            ev = evaluate(model, dataset, cfg, device, task, gt_r, gt_g_r)
+            ev = evaluate(model, dataset, cfg, device, task)
             total_flops = flops_per_step * step
-            # Collect metrics (everything except samples tensor)
-            ckpt_kwargs = {k: v for k, v in ev.items() if k != "samples"}
-            extra_metrics = {k: v for k, v in ckpt_kwargs.items()
-                            if k not in ("clash_rate", "gr_distance")}
-            logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step,
-                            extra_metrics=extra_metrics or None,
-                            clash_rate=ev["clash_rate"])
+            metrics = {k: v for k, v in ev.items() if k != "samples"}
 
-            # Log all metrics
+            # Log metrics
             log_metrics = {"train/total_flops": total_flops}
-            for k, v in ckpt_kwargs.items():
+            for k, v in metrics.items():
                 log_metrics[f"eval/{k}"] = v
             logger.log_train(log_metrics, step=step)
 
-            # Save checkpoint (clash_rate and gr_distance are positional, rest are kwargs)
-            cr = ckpt_kwargs.pop("clash_rate")
-            grd = ckpt_kwargs.pop("gr_distance")
+            # Save checkpoint
+            ew = metrics.get("energy_wasserstein", float("inf"))
             ckpt_mgr.save(model, optimizer, epoch=0, step=step,
-                          clash_rate=cr, config=config_dict, gr_distance=grd, **ckpt_kwargs)
-            print(_format_eval_msg(step, ev, ckpt_mgr.best_gr_distance))
+                          energy_wasserstein=ew, config=config_dict)
+            print(_format_eval_msg(step, ev, ckpt_mgr.best_energy_wasserstein))
 
         # Periodic checkpoint (without eval) — carry forward best metrics
         elif step % cfg.checkpoint.every_n_steps == 0:
             ckpt_mgr.save(
                 model, optimizer, epoch=0, step=step,
-                clash_rate=ckpt_mgr.best_clash_rate, config=config_dict,
-                gr_distance=ckpt_mgr.best_gr_distance,
-                bond_violation_rate=ckpt_mgr.best_bond_violation_rate,
-                nonbonded_clash_rate=ckpt_mgr.best_nonbonded_clash_rate,
+                energy_wasserstein=ckpt_mgr.best_energy_wasserstein,
+                config=config_dict,
             )
             print(f"  Step {step:6d} | Checkpoint saved")
 
     # Final evaluation
     print("\nFinal evaluation...")
-    ev = evaluate(model, dataset, cfg, device, task, gt_r, gt_g_r)
-    ckpt_kwargs = {k: v for k, v in ev.items() if k != "samples"}
-    extra_metrics = {k: v for k, v in ckpt_kwargs.items()
-                    if k not in ("clash_rate", "gr_distance")}
-    logger.log_eval(ev["samples"], dataset.radius, dataset.box_size, step,
-                    extra_metrics=extra_metrics or None,
-                    clash_rate=ev["clash_rate"])
-    cr = ckpt_kwargs.pop("clash_rate")
-    grd = ckpt_kwargs.pop("gr_distance")
+    ev = evaluate(model, dataset, cfg, device, task)
+    metrics = {k: v for k, v in ev.items() if k != "samples"}
+    ew = metrics.get("energy_wasserstein", float("inf"))
     ckpt_mgr.save(model, optimizer, epoch=0, step=step,
-                  clash_rate=cr, config=config_dict, gr_distance=grd, **ckpt_kwargs)
-    print(_format_eval_msg("Final", ev, ckpt_mgr.best_gr_distance))
+                  energy_wasserstein=ew, config=config_dict)
+    print(_format_eval_msg("Final", ev, ckpt_mgr.best_energy_wasserstein))
 
     logger.finish()
     if torch.cuda.is_available():

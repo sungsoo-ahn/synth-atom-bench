@@ -2,15 +2,15 @@
 # Run the full scaling law experiment pipeline.
 set -euo pipefail
 
-DATA_DIR="outputs/data/hard_sphere_N10"
+DATA_DIR="outputs/data/multibody_23_N20_T1.0"
 SCALING_DIR="${1:-outputs/scaling}"
 
 # Generate training data if not present
 if [ ! -f "$DATA_DIR/train.npz" ]; then
     echo "Generating training data..."
     mkdir -p "$DATA_DIR"
-    uv run python data/generate.py --N 10 --eta 0.3 --num_samples 50000 --output "$DATA_DIR/train.npz"
-    uv run python data/generate.py --N 10 --eta 0.3 --num_samples 5000 --seed 123 --output "$DATA_DIR/val.npz"
+    uv run python data/generate_multibody.py --N 20 --T 1.0 --preset multibody_23 --num_samples 50000 --output "$DATA_DIR/train.npz"
+    uv run python data/generate_multibody.py --N 20 --T 1.0 --preset multibody_23 --num_samples 5000 --seed 123 --output "$DATA_DIR/val.npz"
     echo "Data generation complete."
 fi
 

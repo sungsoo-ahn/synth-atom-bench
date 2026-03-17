@@ -105,44 +105,16 @@ class Logger:
 
     def log_eval(
         self,
-        positions: torch.Tensor,
-        radius: float,
-        box_size: float,
         step: int,
-        extra_metrics: dict | None = None,
-        clash_rate: float | None = None,
+        metrics: dict | None = None,
     ) -> None:
         if self._log_dir is None:
             return
-
-        from data.validate import pair_correlation
-        from metrics.clash_rate import clash_rate_batched
-
-        cr = clash_rate if clash_rate is not None else clash_rate_batched(positions, radius)
-        metrics: dict = {"step": step, "eval/clash_rate": cr}
-        if extra_metrics:
-            for k, v in extra_metrics.items():
-                metrics[f"eval/{k}"] = v
-
-        pos_np = positions.cpu().numpy()
-        r, g_r = pair_correlation(pos_np, box_size)
-
-        # Save plots to log dir
-        import matplotlib.pyplot as plt
-        from viz.metrics import plot_gr, plot_min_distance_hist
-
-        plots_dir = os.path.join(self._log_dir, "plots")
-        os.makedirs(plots_dir, exist_ok=True)
-
-        fig = plot_gr(r, g_r, radius)
-        fig.savefig(os.path.join(plots_dir, f"gr_step{step}.png"), dpi=150)
-        plt.close(fig)
-
-        fig = plot_min_distance_hist(pos_np, radius)
-        fig.savefig(os.path.join(plots_dir, f"min_dist_step{step}.png"), dpi=150)
-        plt.close(fig)
-
-        self._append("eval.jsonl", metrics)
+        entry: dict = {"step": step}
+        if metrics:
+            for k, v in metrics.items():
+                entry[f"eval/{k}"] = v
+        self._append("eval.jsonl", entry)
 
     def log_model_config(
         self,
@@ -176,8 +148,7 @@ class Logger:
         self,
         architecture: str,
         compute_budget: float,
-        best_clash_rate: float,
-        best_gr_distance: float = float("inf"),
+        best_energy_wasserstein: float = float("inf"),
         param_count: int | None = None,
         flops_per_step: float | None = None,
     ) -> None:
@@ -186,8 +157,7 @@ class Logger:
         self._append("scaling.jsonl", {
             "architecture": architecture,
             "compute_budget": compute_budget,
-            "best_clash_rate": best_clash_rate,
-            "best_gr_distance": best_gr_distance,
+            "best_energy_wasserstein": best_energy_wasserstein,
             "param_count": param_count,
             "flops_per_step": flops_per_step,
         })

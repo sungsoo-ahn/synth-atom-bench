@@ -6,7 +6,7 @@ set -euo pipefail
 
 HOURS=48
 N_GPUS=8
-DATA="chain_N50"
+DATA="multibody_23_N50_T1.0"
 # Max time per Claude invocation (seconds). If Claude hangs, kill and restart.
 # 2 hours is generous — a single iteration is ~10 min, so Claude should complete
 # many iterations well within this. Context exhaustion normally triggers exit first.
@@ -55,13 +55,11 @@ Setup:
 - GPUs: ${N_GPUS}
 - Time remaining in session: ${REMAINING} minutes
 
-Architecture rotation: transformer -> equiv_gnn -> pairformer, 24 trials each, then repeat.
+Architecture: transformer only. Up to 48 trials or until no improvement.
 
 Instructions:
 1. Read outputs/autoresearch/experiments.jsonl to see what has been tried.
-2. Count trials per architecture in the log. Determine which architecture is current:
-   - Each architecture gets 24 trials per cycle.
-   - Order: transformer (trials 1-24), equiv_gnn (25-48), pairformer (49-72), then cycle 2, etc.
+2. Count trials in the log.
 3. For each iteration:
    a. Read autoresearch/program_session.md for seeded ideas.
    b. Read the target model file (models/<arch>.py) and flow_matching/*.py.
@@ -72,8 +70,7 @@ Instructions:
    f. If kept is true: git add the changed files, git commit with "autoresearch: [<arch>] <description>".
    g. If kept is false: git checkout the changed files to revert.
    The --description flag auto-logs to experiments.jsonl — no separate logging step needed.
-4. Repeat step 3 until 24 trials for the current architecture, then rotate.
-5. Flow matching state carries over between architectures as a warm start.
+4. Repeat step 3 until converged or 48 trials.
 EOF
     )"
 

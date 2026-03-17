@@ -55,9 +55,9 @@ def log_experiment(
     Args:
         archs: List of architectures tested.
         per_arch: {arch: {"variants": {...}, "best": float}} per architecture.
-        best_metric: Best g(r) distance across all variants (for single-arch runs).
+        best_metric: Best energy Wasserstein across all variants (for single-arch runs).
         previous_best_per_arch: {arch: best_metric_for_that_arch} from history.
-        data: Data config name (e.g. "chain_N50", "hard_sphere_N50").
+        data: Data config name (e.g. "multibody_23_N50_T1.0").
         files_changed: Explicit file list; auto-detected from git if None.
     """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)

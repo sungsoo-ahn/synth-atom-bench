@@ -12,7 +12,7 @@ from autoresearch.experiment_log import load_experiments
 from viz.style import ARCH_COLORS, DOUBLE_COL, save_figure, synthbench_style
 
 # Map internal arch names to display names used in ARCH_COLORS
-_DISPLAY = {"equiv_gnn": "Equiv-GNN", "transformer": "Transformer", "pairformer": "Pairformer"}
+_DISPLAY = {"transformer": "Transformer"}
 
 
 def load_baseline(baseline_path: str = "outputs/autoresearch/baselines.json") -> dict:
@@ -24,7 +24,7 @@ def load_baseline(baseline_path: str = "outputs/autoresearch/baselines.json") ->
 
 
 def _extract_per_arch_best(experiment: dict) -> dict[str, float]:
-    """Extract {arch: best_gr_distance} from an experiment entry.
+    """Extract {arch: best_energy_wasserstein} from an experiment entry.
 
     Reads "best" field (best-of-N); falls back to "aggregate" for old entries.
     """
@@ -38,7 +38,7 @@ def _extract_per_arch_best(experiment: dict) -> dict[str, float]:
 
 
 def _extract_variants(experiment: dict) -> dict[str, float]:
-    """Extract {display_label: gr_distance} from an experiment entry.
+    """Extract {display_label: energy_wasserstein} from an experiment entry.
 
     Handles both new per-arch format and legacy flat format.
     """
@@ -50,16 +50,16 @@ def _extract_variants(experiment: dict) -> dict[str, float]:
         for arch, arch_data in per_arch.items():
             variants = arch_data.get("variants", {})
             for label, v in variants.items():
-                if isinstance(v, dict) and "gr_distance" in v and v.get("status") != "error":
+                if isinstance(v, dict) and "energy_wasserstein" in v and v.get("status") != "error":
                     display = f"{arch}/{label}" if multi else label
-                    result[display] = v["gr_distance"]
+                    result[display] = v["energy_wasserstein"]
         return result
 
     # Legacy format: flat "variants" dict
     variants = experiment.get("variants", {})
     for label, v in variants.items():
-        if isinstance(v, dict) and "gr_distance" in v:
-            result[label] = v["gr_distance"]
+        if isinstance(v, dict) and "energy_wasserstein" in v:
+            result[label] = v["energy_wasserstein"]
     return result
 
 
@@ -70,7 +70,7 @@ def _short_label(description: str) -> str:
 
 
 def plot_progress(experiments: list[dict], baseline: float | None, output_dir: str):
-    """Per-architecture progress: g(r) distance over iterations (#5).
+    """Per-architecture progress: Energy Wasserstein over iterations (#5).
 
     Plots one line per architecture so architecture-phase and flow-matching-phase
     results are not conflated on a single y-axis.
@@ -161,7 +161,7 @@ def plot_progress(experiments: list[dict], baseline: float | None, output_dir: s
                        label=f"Oracle ({baseline:.4f})")
 
         ax.set_xlabel("Iteration")
-        ax.set_ylabel("g(r) distance")
+        ax.set_ylabel("Energy Wasserstein")
         ax.set_title("Autoresearch Progress (per architecture)")
         ax.legend(frameon=False, fontsize=8, ncol=2)
 
@@ -195,7 +195,7 @@ def plot_progress(experiments: list[dict], baseline: float | None, output_dir: s
 
 
 def plot_variant_heatmap(experiments: list[dict], output_dir: str):
-    """Heatmap of g(r) distance across iterations x variants."""
+    """Heatmap of Energy Wasserstein across iterations x variants."""
     if not experiments:
         return
 
@@ -219,7 +219,7 @@ def plot_variant_heatmap(experiments: list[dict], output_dir: str):
         fig, ax = plt.subplots(figsize=(max(7, len(labels) * 0.8), max(4, len(experiments) * 0.3 + 1)))
 
         im = ax.imshow(matrix, aspect="auto", cmap="RdYlGn_r", interpolation="nearest")
-        fig.colorbar(im, ax=ax, label="g(r) distance")
+        fig.colorbar(im, ax=ax, label="Energy Wasserstein")
 
         ax.set_xticks(range(len(labels)))
         ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
@@ -227,7 +227,7 @@ def plot_variant_heatmap(experiments: list[dict], output_dir: str):
         ax.set_yticklabels([f"#{i+1}" for i in range(len(experiments))], fontsize=8)
         ax.set_xlabel("Variant")
         ax.set_ylabel("Iteration")
-        ax.set_title("Per-Variant g(r) Distance")
+        ax.set_title("Per-Variant Energy Wasserstein")
 
         save_figure(fig, os.path.join(output_dir, "variant_heatmap"))
 
@@ -235,7 +235,7 @@ def plot_variant_heatmap(experiments: list[dict], output_dir: str):
 def plot_improvement_timeline(experiments: list[dict], baseline: float | None, output_dir: str):
     """Per-architecture running best over iterations (#5).
 
-    Tracks the running best g(r) distance for each architecture independently,
+    Tracks the running best Energy Wasserstein for each architecture independently,
     avoiding cross-phase confusion.
     """
     if not experiments:
@@ -278,7 +278,7 @@ def plot_improvement_timeline(experiments: list[dict], baseline: float | None, o
             ax1.axhline(baseline, color="#3498db", linestyle="--", alpha=0.7, label=f"Oracle ({baseline:.4f})")
 
         ax1.set_xlabel("Iteration")
-        ax1.set_ylabel("Running best g(r) distance")
+        ax1.set_ylabel("Running best Energy Wasserstein")
         ax1.set_title("Cumulative Improvement (per architecture)")
 
         # Secondary axis: accept rate
@@ -296,7 +296,7 @@ def main():
     parser = argparse.ArgumentParser(description="Visualize autoresearch experiment log")
     parser.add_argument("--log", default="outputs/autoresearch/experiments.jsonl")
     parser.add_argument("--output", default="outputs/autoresearch/plots")
-    parser.add_argument("--data", default=None, help="Data config name to select correct baseline (e.g. chain_N50)")
+    parser.add_argument("--data", default=None, help="Data config name to select correct baseline (e.g. multibody_23_N50_T1.0)")
     args = parser.parse_args()
 
     if not os.path.isfile(args.log):
@@ -317,11 +317,11 @@ def main():
     if data_name is None and experiments:
         data_name = experiments[0].get("data")
     if data_name and data_name in baselines:
-        baseline_metric = baselines[data_name].get("gr_distance")
+        baseline_metric = baselines[data_name].get("energy_wasserstein")
     elif baselines:
         # Fallback: first baseline (legacy behavior)
         for key, val in baselines.items():
-            baseline_metric = val.get("gr_distance")
+            baseline_metric = val.get("energy_wasserstein")
             break
 
     os.makedirs(args.output, exist_ok=True)

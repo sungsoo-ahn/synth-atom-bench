@@ -1,110 +1,67 @@
-"""Tests for clash rate and g(r) distance metrics."""
+"""Tests for energy metrics."""
 
 import numpy as np
 import torch
 import pytest
 
-from metrics.clash_rate import has_clash, clash_rate, clash_rate_batched
-from metrics.gr_distance import gr_distance
-from data.validate import pair_correlation
+from metrics.energy import (
+    bond_energy_batch,
+    angle_energy_batch,
+    dihedral_energy_batch,
+    total_energy_batch,
+    energy_wasserstein,
+)
 
 
-class TestHasClash:
-    def test_no_clash(self):
-        # Two atoms far apart
-        positions = torch.tensor([[[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]]])
-        assert not has_clash(positions, radius=0.5).item()
+class TestBondEnergyBatch:
+    def test_zero_at_r0(self):
+        positions = torch.zeros(2, 5, 3)
+        for i in range(5):
+            positions[:, i, 0] = i * 1.5
+        E = bond_energy_batch(positions, k2=1.0, r0=1.5)
+        assert E.shape == (2,)
+        assert torch.allclose(E, torch.zeros(2), atol=1e-6)
 
-    def test_has_clash(self):
-        # Two atoms overlapping
-        positions = torch.tensor([[[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]]])
-        assert has_clash(positions, radius=0.5).item()
-
-    def test_exactly_touching(self):
-        # Distance = 2*radius exactly — not a clash (< not <=)
-        positions = torch.tensor([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]])
-        assert not has_clash(positions, radius=0.5).item()
-
-    def test_batch(self):
-        positions = torch.tensor([
-            [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]],  # no clash
-            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]],  # clash
-        ])
-        result = has_clash(positions, radius=0.5)
-        assert result.shape == (2,)
-        assert not result[0].item()
-        assert result[1].item()
+    def test_positive_for_stretched(self):
+        positions = torch.zeros(1, 3, 3)
+        for i in range(3):
+            positions[0, i, 0] = i * 2.0
+        E = bond_energy_batch(positions, k2=1.0, r0=1.5)
+        assert E.item() > 0
 
 
-class TestClashRate:
-    def test_all_clean(self):
-        positions = torch.tensor([
-            [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]],
-            [[0.0, 0.0, 0.0], [0.0, 5.0, 0.0]],
-        ])
-        assert clash_rate(positions, radius=0.5) == 0.0
-
-    def test_all_clashing(self):
-        positions = torch.tensor([
-            [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]],
-            [[0.0, 0.0, 0.0], [0.0, 0.1, 0.0]],
-        ])
-        assert clash_rate(positions, radius=0.5) == 1.0
-
-    def test_half_clashing(self):
-        positions = torch.tensor([
-            [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]],  # clean
-            [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]],  # clash
-        ])
-        assert clash_rate(positions, radius=0.5) == 0.5
+class TestAngleEnergyBatch:
+    def test_too_few_atoms(self):
+        positions = torch.zeros(2, 2, 3)
+        E = angle_energy_batch(positions, k3=1.0, theta0=1.0)
+        assert torch.allclose(E, torch.zeros(2))
 
 
-class TestClashRateBatched:
-    def test_matches_unbatched(self):
-        torch.manual_seed(42)
-        positions = torch.randn(100, 3, 3) * 5
-        r1 = clash_rate(positions, radius=0.5)
-        r2 = clash_rate_batched(positions, radius=0.5, chunk_size=10)
-        assert abs(r1 - r2) < 1e-6
+class TestDihedralEnergyBatch:
+    def test_too_few_atoms(self):
+        positions = torch.zeros(2, 3, 3)
+        E = dihedral_energy_batch(positions, k4=0.5, phi0=1.0)
+        assert torch.allclose(E, torch.zeros(2))
 
 
-class TestGrDistance:
-    def _random_uniform_positions(self, n_samples, n_atoms, box_size, seed=42):
-        rng = np.random.default_rng(seed)
-        return rng.uniform(0, box_size, size=(n_samples, n_atoms, 3))
+class TestTotalEnergyBatch:
+    def test_preset_selection(self):
+        positions = torch.randn(4, 10, 3)
+        E2 = total_energy_batch(positions, "multibody_2")
+        E23 = total_energy_batch(positions, "multibody_23")
+        E234 = total_energy_batch(positions, "multibody_234")
+        assert (E23 >= E2).all()
+        assert (E234 >= E23).all()
 
-    def test_identical_distributions(self):
-        """Same data for generated and ground truth should give distance ~0."""
-        box_size = 5.0
-        positions = self._random_uniform_positions(200, 10, box_size)
-        gt_r, gt_g_r = pair_correlation(positions, box_size)
-        dist = gr_distance(positions, gt_r, gt_g_r, box_size)
-        assert dist < 0.05, f"Expected ~0 distance for identical data, got {dist}"
 
-    def test_different_distributions(self):
-        """Clustered positions should have different g(r) than uniform."""
-        box_size = 5.0
-        # Ground truth: uniform
-        gt_positions = self._random_uniform_positions(200, 10, box_size, seed=0)
-        gt_r, gt_g_r = pair_correlation(gt_positions, box_size)
-        # Generated: clustered (all atoms near origin)
-        rng = np.random.default_rng(99)
-        gen_positions = rng.normal(loc=box_size / 2, scale=0.3, size=(200, 10, 3))
-        gen_positions = np.clip(gen_positions, 0, box_size)
-        dist = gr_distance(gen_positions, gt_r, gt_g_r, box_size)
-        assert dist > 0.1, f"Expected large distance for different distributions, got {dist}"
+class TestEnergyWasserstein:
+    def test_identical(self):
+        E = torch.randn(100)
+        w = energy_wasserstein(E, E)
+        assert w < 1e-6
 
-    def test_lower_is_better(self):
-        """More similar distributions should have lower distance."""
-        box_size = 5.0
-        gt_positions = self._random_uniform_positions(500, 10, box_size, seed=0)
-        gt_r, gt_g_r = pair_correlation(gt_positions, box_size)
-        # Similar: another uniform sample
-        similar = self._random_uniform_positions(500, 10, box_size, seed=1)
-        dist_similar = gr_distance(similar, gt_r, gt_g_r, box_size)
-        # Dissimilar: clustered
-        rng = np.random.default_rng(99)
-        dissimilar = rng.normal(loc=box_size / 2, scale=0.3, size=(500, 10, 3))
-        dissimilar = np.clip(dissimilar, 0, box_size)
-        dist_dissimilar = gr_distance(dissimilar, gt_r, gt_g_r, box_size)
-        assert dist_similar < dist_dissimilar
+    def test_different(self):
+        E1 = torch.zeros(100)
+        E2 = torch.ones(100) * 10
+        w = energy_wasserstein(E1, E2)
+        assert w > 5.0

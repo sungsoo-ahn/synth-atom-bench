@@ -2,7 +2,7 @@
 # Run hyperparameter sweep using Hydra multirun with joblib launcher (8 GPUs).
 set -euo pipefail
 
-DATA_DIR="outputs/data/hard_sphere_N10"
+DATA_DIR="outputs/data/multibody_23_N20_T1.0"
 SWEEP_DIR="${1:-outputs/sweep}"
 MAX_STEPS="${2:-100000}"
 
@@ -10,14 +10,14 @@ MAX_STEPS="${2:-100000}"
 if [ ! -f "$DATA_DIR/train.npz" ]; then
     echo "Generating training data..."
     mkdir -p "$DATA_DIR"
-    uv run python data/generate.py --N 10 --eta 0.3 --num_samples 50000 --output "$DATA_DIR/train.npz"
-    uv run python data/generate.py --N 10 --eta 0.3 --num_samples 5000 --seed 123 --output "$DATA_DIR/val.npz"
+    uv run python data/generate_multibody.py --N 20 --T 1.0 --preset multibody_23 --num_samples 50000 --output "$DATA_DIR/train.npz"
+    uv run python data/generate_multibody.py --N 20 --T 1.0 --preset multibody_23 --num_samples 5000 --seed 123 --output "$DATA_DIR/val.npz"
     echo "Data generation complete."
 fi
 
 echo "Running sweep (max_steps=$MAX_STEPS, 8 GPUs)..."
 uv run python experiments/train.py --multirun \
-    model=equiv_gnn,transformer,pairformer \
+    model=transformer \
     model.size=small,medium,large \
     train.lr=1e-5,3e-5,1e-4,3e-4,1e-3 \
     train.max_steps=$MAX_STEPS \

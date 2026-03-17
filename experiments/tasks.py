@@ -19,11 +19,7 @@ class Task(ABC):
 
     @abstractmethod
     def compute_metrics(self, samples: torch.Tensor, dataset) -> dict[str, float]:
-        """Compute task-specific metrics on generated samples.
-
-        Returns dict of metric_name -> value beyond the base metrics
-        (clash_rate and gr_distance are always computed by the caller).
-        """
+        """Compute task-specific metrics on generated samples."""
 
     @abstractmethod
     def run_name(self, cfg: DictConfig, n_atoms: int) -> str:
@@ -38,74 +34,39 @@ class Task(ABC):
         """Return shell command to generate data for this task."""
 
 
-class HardSphereTask(Task):
-    def __init__(self, eta: float | None = None):
-        self.eta = eta
-
+class MultibodyTask(Task):
     def load_dataset(self, path):
-        from data.dataset import HardSphereDataset
-        return HardSphereDataset(path)
-
-    def model_kwargs(self):
-        return {}
-
-    def compute_metrics(self, samples, dataset):
-        return {}
-
-    def run_name(self, cfg, n_atoms):
-        return f"{cfg.model.arch}_N{n_atoms}_hard_sphere"
-
-    def describe_data(self, dataset):
-        N = dataset.positions.shape[1]
-        return f"hard-sphere, N={N}, radius={dataset.radius}, box_size={dataset.box_size:.4f}"
-
-    def data_generator_cmd(self, n_atoms: int, n_samples: int, output_path: str) -> str:
-        eta = self.eta or 0.3
-        return (
-            f"uv run python data/generate.py --N {n_atoms} --eta {eta} "
-            f"--num_samples {n_samples} --output {output_path}"
-        )
-
-
-class ChainTask(Task):
-    def load_dataset(self, path):
-        from data.chain_dataset import ChainDataset
-        return ChainDataset(path)
+        from data.multibody_dataset import MultibodyDataset
+        return MultibodyDataset(path)
 
     def model_kwargs(self):
         return {"atom_ordering": True}
 
     def compute_metrics(self, samples, dataset):
-        from metrics.bond_violation import (
-            bond_violation_rate_batched,
-            nonbonded_clash_rate_batched,
-        )
-        return {
-            "bond_violation_rate": bond_violation_rate_batched(
-                samples, dataset.bond_length
-            ),
-            "nonbonded_clash_rate": nonbonded_clash_rate_batched(
-                samples, dataset.radius
-            ),
-        }
+        from metrics.energy import energy_metrics_batched
+        return energy_metrics_batched(samples, dataset)
 
     def run_name(self, cfg, n_atoms):
-        return f"{cfg.model.arch}_N{n_atoms}_chain"
+        preset = cfg.data.preset
+        T = cfg.data.temperature
+        return f"{cfg.model.arch}_N{n_atoms}_{preset}_T{T}"
 
     def describe_data(self, dataset):
         N = dataset.positions.shape[1]
-        return f"chain, N={N}, bond_length={dataset.bond_length}, radius={dataset.radius}, box_size={dataset.box_size:.4f}"
+        return (
+            f"multibody, N={N}, preset={dataset.preset}, "
+            f"T={dataset.temperature}, box_size={dataset.box_size:.4f}"
+        )
 
     def data_generator_cmd(self, n_atoms: int, n_samples: int, output_path: str) -> str:
         return (
-            f"uv run python data/generate_chains.py --N {n_atoms} "
+            f"uv run python data/generate_multibody.py --N {n_atoms} "
             f"--num_samples {n_samples} --output {output_path}"
         )
 
 
 TASK_REGISTRY = {
-    "hard_sphere": HardSphereTask,
-    "chain": ChainTask,
+    "multibody": MultibodyTask,
 }
 
 
@@ -119,17 +80,4 @@ def get_task(cfg: DictConfig) -> Task:
 
 def get_task_from_data(path: str) -> Task:
     """Auto-detect task from .npz file contents (for standalone eval)."""
-    import warnings
-
-    import numpy as np
-    data = np.load(path)
-    has_bond = "bond_length" in data.files
-    data.close()
-    if has_bond:
-        return ChainTask()
-    warnings.warn(
-        f"No 'bond_length' field in {path} — defaulting to HardSphereTask. "
-        "If this is chain data, the .npz may be missing required fields.",
-        stacklevel=2,
-    )
-    return HardSphereTask()
+    return MultibodyTask()

@@ -32,4 +32,4 @@ def flow_matching_loss(model: nn.Module, x_0: Tensor) -> Tensor:
     t_weight = 1 + 8 * torch.relu(t - 0.5)
     dist_loss = (t_weight[:, None, None] * (dist_pred - dist_true).abs()).mean()
 
-    return main_loss + 0.1 * dist_loss
+    return main_loss + 0.3 * dist_loss

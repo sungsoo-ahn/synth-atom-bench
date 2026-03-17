@@ -199,8 +199,10 @@ class PairformerBlock(nn.Module):
         pair_dim: int,
         num_heads: int,
         expansion_factor: float = 4.0,
+        residual_scale: float = 1.0,
     ):
         super().__init__()
+        self.residual_scale = residual_scale
         self.outer_product_mean = OuterProductMean(hidden_dim, pair_dim)
         self.tri_mul_out = TriangleMultiplication(pair_dim, mode="outgoing")
         self.tri_mul_in = TriangleMultiplication(pair_dim, mode="incoming")
@@ -223,10 +225,11 @@ class PairformerBlock(nn.Module):
         Returns:
             Updated (s, z).
         """
-        z = z + self.outer_product_mean(s)
-        z = z + self.tri_mul_out(z)
-        z = z + self.tri_mul_in(z)
-        z = z + self.pair_transition(z)
+        rs = self.residual_scale
+        z = z + rs * self.outer_product_mean(s)
+        z = z + rs * self.tri_mul_out(z)
+        z = z + rs * self.tri_mul_in(z)
+        z = z + rs * self.pair_transition(z)
 
         if t_emb is not None:
             # adaLN-Zero on attention output
@@ -288,9 +291,11 @@ class PairformerVelocityNetwork(nn.Module):
         if atom_ordering:
             self.ordering_embed = AtomOrderingEmbedding(hidden_dim)
 
-        # Pairformer blocks
+        # Pairformer blocks with residual scaling 1/sqrt(num_layers)
+        import math
+        residual_scale = 1.0 / math.sqrt(num_layers)
         self.blocks = nn.ModuleList([
-            PairformerBlock(hidden_dim, pair_dim, num_heads, expansion_factor)
+            PairformerBlock(hidden_dim, pair_dim, num_heads, expansion_factor, residual_scale)
             for _ in range(num_layers)
         ])
 

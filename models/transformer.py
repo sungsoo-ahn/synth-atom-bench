@@ -87,8 +87,9 @@ class DiTBlock(nn.Module):
     block acts as an identity, following the DiT design.
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int, mlp_ratio: float = 4.0):
+    def __init__(self, hidden_dim: int, num_heads: int, mlp_ratio: float = 4.0, residual_scale: float = 1.0):
         super().__init__()
+        self.residual_scale = residual_scale
         self.norm1 = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
         self.attn = SelfAttention(hidden_dim, num_heads)
         self.norm2 = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=1e-6)
@@ -116,9 +117,9 @@ class DiTBlock(nn.Module):
             self.adaLN_modulation(c).chunk(6, dim=-1)
         )
         h = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), bias=bias)
-        x = x + gate_msa.unsqueeze(1) * h
+        x = x + self.residual_scale * gate_msa.unsqueeze(1) * h
         h = self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-        x = x + gate_mlp.unsqueeze(1) * h
+        x = x + self.residual_scale * gate_mlp.unsqueeze(1) * h
         return x
 
 
@@ -191,9 +192,10 @@ class TransformerVelocityNetwork(nn.Module):
         if atom_ordering:
             self.ordering_embed = AtomOrderingEmbedding(hidden_dim)
 
-        # Transformer blocks
+        # Transformer blocks with residual scaling for training stability
+        residual_scale = num_layers ** -0.5
         self.blocks = nn.ModuleList(
-            [DiTBlock(hidden_dim, num_heads, mlp_ratio) for _ in range(num_layers)]
+            [DiTBlock(hidden_dim, num_heads, mlp_ratio, residual_scale=residual_scale) for _ in range(num_layers)]
         )
 
         # Output: adaLN + projection → 3D velocity

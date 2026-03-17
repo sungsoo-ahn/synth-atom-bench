@@ -29,14 +29,19 @@ def sample(
     """
     model.eval()
     x = torch.randn(n_samples, n_atoms, 3, device=device)
-    dt = 1.0 / n_steps
+
+    # Cosine step spacing: concentrate steps near t=1 where trajectories curve most
+    import math
+    t_schedule = [0.5 * (1 - math.cos(math.pi * i / n_steps)) for i in range(n_steps + 1)]
 
     for i in range(n_steps):
-        t_i = i * dt
+        t_i = t_schedule[i]
+        t_next_i = t_schedule[i + 1]
+        dt = t_next_i - t_i
         t = torch.full((n_samples,), t_i, device=device)
         v1 = model(x, t)
         x_pred = x + v1 * dt
-        t_next = torch.full((n_samples,), min(t_i + dt, 1.0), device=device)
+        t_next = torch.full((n_samples,), t_next_i, device=device)
         v2 = model(x_pred, t_next)
         x = x + 0.5 * dt * (v1 + v2)
 

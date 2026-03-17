@@ -6,20 +6,15 @@ import os
 import subprocess
 import sys
 import time
-import traceback
 
-import numpy as np
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
 
-from data.dataset import HardSphereDataset
-from data.validate import pair_correlation
+# Only import the registry (frozen module) at top level.
+# Editable modules (flow_matching/*, models/*, data/*, metrics/*) are imported
+# inside quick_train_eval() which runs in subprocesses, so agent edits are
+# always picked up fresh and a broken edit won't crash the main process
+# before the preflight check runs.
 from experiments.model_registry import MODEL_DEFAULTS, MODEL_REGISTRY, SIZE_PRESETS
-from flow_matching.sampling import sample_batched
-from flow_matching.training import flow_matching_loss
-from metrics.clash_rate import clash_rate_batched
-from metrics.gr_distance import gr_distance
 
 ALL_ARCHS = list(MODEL_REGISTRY.keys())
 
@@ -38,6 +33,7 @@ def random_rotation_matrix(device: torch.device) -> torch.Tensor:
 def quick_train_eval(
     arch: str,
     data_path: str,
+    task_name: str,
     train_time_s: float,
     device: str,
     model_size: str = "medium",
@@ -46,17 +42,38 @@ def quick_train_eval(
     n_ode_steps: int = 50,
     eval_samples: int = 2000,
     warmup_frac: float = 0.1,
+    weight_decay: float = 0.01,
+    seed: int = 42,
 ) -> dict:
     """Quick train loop + evaluation, constrained by wall-clock time.
 
     Args:
+        task_name: "hard_sphere" or "chain".
         train_time_s: Training time budget in seconds (excludes data loading
             and evaluation).
+        seed: Random seed for reproducibility.
     """
+    # Lazy imports — these modules are editable by the agent, so we import them
+    # here (inside the subprocess) rather than at module level.
+    from torch.utils.data import DataLoader
+
+    from data.validate import pair_correlation
+    from experiments.tasks import TASK_REGISTRY
+    from flow_matching.sampling import sample_batched
+    from flow_matching.training import flow_matching_loss
+    from metrics.clash_rate import clash_rate_batched
+    from metrics.gr_distance import gr_distance
+
+    # Seed for reproducibility
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     t0 = time.time()
 
-    # Load data
-    dataset = HardSphereDataset(data_path)
+    # Load data via task system
+    task = TASK_REGISTRY[task_name]()
+    dataset = task.load_dataset(data_path)
     box_size = dataset.box_size
     n_atoms = dataset.positions.shape[1]
     radius = dataset.radius
@@ -69,13 +86,14 @@ def quick_train_eval(
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=0)
 
-    # Build model
+    # Build model — merge task-specific kwargs (e.g. atom_ordering for chains)
     kwargs = {**MODEL_DEFAULTS[arch], **SIZE_PRESETS[arch][model_size]}
     kwargs["cutoff"] = box_size * 1.5
+    kwargs.update(task.model_kwargs())
     model = MODEL_REGISTRY[arch](**kwargs).to(device)
 
     # Optimizer — constant LR with linear warmup (no cosine: total steps unknown)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     warmup_time_s = warmup_frac * train_time_s
 
     # Train until time budget exhausted
@@ -95,11 +113,13 @@ def quick_train_eval(
             data_iter = iter(loader)
             batch = next(data_iter)
 
-        # Linear warmup
-        if elapsed < warmup_time_s and warmup_time_s > 0:
-            warmup_scale = elapsed / warmup_time_s
+        # Linear warmup; constant LR after (#5)
+        if warmup_time_s > 0 and elapsed < warmup_time_s:
             for pg in optimizer.param_groups:
-                pg["lr"] = lr * warmup_scale
+                pg["lr"] = lr * (elapsed / warmup_time_s)
+        else:
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
 
         x_0 = batch["positions"].to(device)
         R = random_rotation_matrix(torch.device(device))
@@ -124,6 +144,9 @@ def quick_train_eval(
     cr = clash_rate_batched(samples, radius)
     grd = gr_distance(samples.numpy(), gt_r, gt_g_r, box_size)
 
+    # Task-specific metrics (e.g. bond_violation_rate, nonbonded_clash_rate for chains)
+    task_metrics = task.compute_metrics(samples, dataset)
+
     wall_time = time.time() - t0
 
     # Cleanup
@@ -131,7 +154,7 @@ def quick_train_eval(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return {
+    result = {
         "gr_distance": grd,
         "clash_rate": cr,
         "steps": step,
@@ -140,6 +163,8 @@ def quick_train_eval(
         "model_size": model_size,
         "lr": lr,
     }
+    result.update(task_metrics)
+    return result
 
 
 def parse_variants(variants_str: str | None) -> list[dict]:
@@ -149,9 +174,9 @@ def parse_variants(variants_str: str | None) -> list[dict]:
     Returns list of dicts with all combinations.
     """
     if variants_str is None:
-        # Default grid: 4 sizes x 2 LRs = 8 variants
-        sizes = ["xs", "small", "medium", "large"]
-        lrs = [1e-4, 3e-4]
+        # Default grid: 2 sizes x 4 LRs = 8 variants
+        sizes = ["small", "medium"]
+        lrs = [3e-5, 1e-4, 3e-4, 1e-3]
     else:
         axes = {}
         for part in variants_str.split(";"):
@@ -175,25 +200,46 @@ def variant_label(v: dict) -> str:
 # ── Subprocess-based parallel execution ───────────────────────────────────────
 
 
+def _batch_size_for_variant(base_batch_size: int, model_size: str) -> int:
+    """Scale batch size down for larger model sizes to avoid OOM.
+
+    xs/small use the full batch size. medium halves it, large quarters it.
+    """
+    scale = {"xs": 1.0, "small": 1.0, "medium": 0.5, "large": 0.25, "xl": 0.125}
+    factor = scale.get(model_size, 0.25)
+    return max(16, int(base_batch_size * factor))
+
+
 def _build_subprocess_cmd(arch: str, args, variant: dict) -> list[str]:
-    """Build the Python command to run a single variant in a subprocess."""
-    return [
-        sys.executable, "-c",
-        f"import json, sys; sys.path.insert(0, '.'); "
-        f"from autoresearch.run import quick_train_eval; "
-        f"result = quick_train_eval("
-        f"arch={arch!r}, data_path={args.data_path!r}, "
-        f"train_time_s={args.train_time_s}, device='cuda:0', "
-        f"model_size={variant['model_size']!r}, lr={variant['lr']}, "
-        f"batch_size={args.batch_size}, n_ode_steps={args.n_ode_steps}, "
-        f"eval_samples={args.eval_samples}, warmup_frac={args.warmup_frac}); "
-        f"print(json.dumps(result))"
-    ]
+    """Build the Python command to run a single variant in a subprocess.
+
+    Wraps in try/except so import errors and crashes produce JSON, not silent failure (#2).
+    """
+    batch_size = _batch_size_for_variant(args.batch_size, variant["model_size"])
+    script = (
+        f"import json, sys, traceback, torch\n"
+        f"sys.path.insert(0, '.')\n"
+        f"_dev = 'cuda:0' if torch.cuda.is_available() else 'cpu'\n"
+        f"try:\n"
+        f"    from autoresearch.run import quick_train_eval\n"
+        f"    result = quick_train_eval(\n"
+        f"        arch={arch!r}, data_path={args.data_path!r},\n"
+        f"        task_name={args.task_name!r},\n"
+        f"        train_time_s={args.train_time_s}, device=_dev,\n"
+        f"        model_size={variant['model_size']!r}, lr={variant['lr']},\n"
+        f"        batch_size={batch_size}, n_ode_steps={args.n_ode_steps},\n"
+        f"        eval_samples={args.eval_samples}, warmup_frac={args.warmup_frac},\n"
+        f"        weight_decay={args.weight_decay})\n"
+        f"    print(json.dumps(result))\n"
+        f"except Exception as e:\n"
+        f"    print(json.dumps({{'status': 'error', 'error': str(e), 'traceback': traceback.format_exc()}}))\n"
+    )
+    return [sys.executable, "-c", script]
 
 
 def _parse_subprocess_output(stdout: str, stderr: str, returncode: int) -> dict:
     """Extract JSON result from subprocess output."""
-    if returncode == 0 and stdout.strip():
+    if stdout and stdout.strip():
         for line in reversed(stdout.strip().split("\n")):
             line = line.strip()
             if line.startswith("{"):
@@ -201,69 +247,124 @@ def _parse_subprocess_output(stdout: str, stderr: str, returncode: int) -> dict:
                     return json.loads(line)
                 except json.JSONDecodeError:
                     pass
-    return {"status": "error", "error": f"exit={returncode}, stderr={stderr[-500:]}"}
+    return {"status": "error", "error": f"exit={returncode}, stderr={stderr[-500:] if stderr else '(empty)'}"}
 
 
-def run_variants_for_arch(
-    arch: str, args, variants: list[dict], n_gpus: int,
-) -> dict[str, dict]:
-    """Run all variants for a single architecture across GPUs."""
-    results = {}
+def _preflight_import_check():
+    """Verify that editable modules (flow_matching, models) parse without error.
 
-    if n_gpus <= 1:
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        for i, v in enumerate(variants):
-            label = variant_label(v)
-            print(f"  [{arch}] Variant {i+1}/{len(variants)}: {label}", file=sys.stderr)
-            try:
-                result = quick_train_eval(
-                    arch=arch, data_path=args.data_path, train_time_s=args.train_time_s,
-                    device=device, model_size=v["model_size"], lr=v["lr"],
-                    batch_size=args.batch_size, n_ode_steps=args.n_ode_steps,
-                    eval_samples=args.eval_samples, warmup_frac=args.warmup_frac,
-                )
-                results[label] = result
-            except Exception as e:
-                results[label] = {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
-        return results
+    Runs a quick import in a subprocess so that a syntax error in agent-edited
+    code fails fast instead of wasting GPU time on 24 identical import failures.
+    """
+    script = (
+        "import sys; sys.path.insert(0, '.'); "
+        "import flow_matching.training, flow_matching.sampling, flow_matching.interpolation; "
+        "from experiments.model_registry import MODEL_REGISTRY; "
+        "[cls() for cls in []]"  # no-op, just ensure imports succeed
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        error_msg = result.stderr.strip().split("\n")[-3:]  # last 3 lines of traceback
+        print(json.dumps({
+            "status": "error",
+            "error": "Import check failed — edited code has errors",
+            "detail": "\n".join(error_msg),
+        }, indent=2))
+        sys.exit(1)
 
-    # Parallel execution
-    job_queue = list(enumerate(variants))
-    active: dict[int, tuple[subprocess.Popen, str, int]] = {}
 
-    def _launch(gpu_id: int, job_idx: int, variant: dict):
+def run_all_jobs(
+    archs: list[str], args, variants: list[dict], n_gpus: int,
+) -> dict[str, dict[str, dict]]:
+    """Run all (arch x variant) combinations across GPUs in a single scheduling pass.
+
+    Always uses subprocesses, even for n_gpus=1, so that agent edits to
+    flow_matching/ or models/ are picked up fresh (no stale module cache) (#6).
+
+    Returns {arch: {variant_label: result_dict}}.
+    """
+    results = {arch: {} for arch in archs}
+
+    # Flatten all (arch, variant) into a single job queue — subprocess per job
+    # so agent edits to flow_matching/ or models/ are always picked up fresh.
+    n_slots = max(n_gpus, 1)  # at least 1 slot even for CPU-only
+    use_gpu = n_gpus >= 1 and torch.cuda.is_available()
+    job_queue = [(arch, v) for arch in archs for v in variants]
+    total = len(job_queue)
+    # slot -> (proc, arch, label, start_time)
+    active: dict[int, tuple[subprocess.Popen, str, str, float]] = {}
+    completed = 0
+
+    # Per-job timeout: training time + generous margin for data loading + eval
+    job_timeout_s = args.train_time_s + 600
+
+    def _launch(slot_id: int, arch: str, variant: dict):
         label = variant_label(variant)
         cmd = _build_subprocess_cmd(arch, args, variant)
-        env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_id)}
+        if use_gpu:
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(slot_id)}
+        else:
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-        active[gpu_id] = (proc, label, job_idx)
-        print(f"  [{arch}] [GPU {gpu_id}] Started: {label}", file=sys.stderr)
+        active[slot_id] = (proc, arch, label, time.time())
+        gpu_str = f"GPU {slot_id}" if use_gpu else "CPU"
+        print(f"  [{arch}] [{gpu_str}] Started: {label}", file=sys.stderr)
 
-    for gpu_id in range(min(n_gpus, len(job_queue))):
-        job_idx, variant = job_queue.pop(0)
-        _launch(gpu_id, job_idx, variant)
+    def _finish(slot_id: int, proc: subprocess.Popen, arch: str, label: str, timed_out: bool):
+        nonlocal completed
+        if timed_out:
+            proc.kill()
+            proc.wait(timeout=10)
+            try:
+                stdout = proc.stdout.read()
+                stderr = proc.stderr.read()
+            except Exception:
+                stdout, stderr = "", ""
+            parsed = {"status": "error", "error": f"Killed: exceeded {job_timeout_s:.0f}s timeout"}
+        else:
+            stdout = proc.stdout.read()
+            stderr = proc.stderr.read()
+            parsed = _parse_subprocess_output(stdout, stderr, proc.returncode)
+
+        results[arch][label] = parsed
+        completed += 1
+        status = "OK" if "status" not in parsed else parsed["status"]
+        gpu_str = f"GPU {slot_id}" if use_gpu else "CPU"
+        timeout_str = " [TIMEOUT]" if timed_out else ""
+        print(
+            f"  [{arch}] [{gpu_str}] Done ({completed}/{total}): {label} [{status}]{timeout_str}",
+            file=sys.stderr,
+        )
+
+    # Fill initial slots
+    for slot_id in range(min(n_slots, len(job_queue))):
+        arch, variant = job_queue.pop(0)
+        _launch(slot_id, arch, variant)
 
     while active:
         time.sleep(2)
-        for gpu_id in list(active.keys()):
-            proc, label, job_idx = active[gpu_id]
+        for slot_id in list(active.keys()):
+            proc, arch, label, start_t = active[slot_id]
             ret = proc.poll()
+            elapsed = time.time() - start_t
+
             if ret is not None:
-                stdout = proc.stdout.read()
-                stderr = proc.stderr.read()
-                del active[gpu_id]
-
-                parsed = _parse_subprocess_output(stdout, stderr, ret)
-                results[label] = parsed
-                status = "OK" if "status" not in parsed else parsed["status"]
-                print(
-                    f"  [{arch}] [GPU {gpu_id}] Done ({len(results)}/{len(variants)}): {label} [{status}]",
-                    file=sys.stderr,
-                )
-
+                # Process exited normally
+                del active[slot_id]
+                _finish(slot_id, proc, arch, label, timed_out=False)
                 if job_queue:
-                    next_idx, next_variant = job_queue.pop(0)
-                    _launch(gpu_id, next_idx, next_variant)
+                    next_arch, next_variant = job_queue.pop(0)
+                    _launch(slot_id, next_arch, next_variant)
+            elif elapsed > job_timeout_s:
+                # Process hung — kill it
+                del active[slot_id]
+                _finish(slot_id, proc, arch, label, timed_out=True)
+                if job_queue:
+                    next_arch, next_variant = job_queue.pop(0)
+                    _launch(slot_id, next_arch, next_variant)
 
     return results
 
@@ -271,33 +372,60 @@ def run_variants_for_arch(
 # ── Aggregation helpers ───────────────────────────────────────────────────────
 
 
-def _aggregate_variant_results(variant_results: dict[str, dict]) -> tuple[float | None, list[float]]:
-    """Compute mean g(r) distance from variant results. Returns (mean, values)."""
-    gr_values = [
-        r["gr_distance"]
-        for r in variant_results.values()
-        if "gr_distance" in r and r.get("status") != "error"
-    ]
-    if not gr_values:
-        return None, []
-    return sum(gr_values) / len(gr_values), gr_values
+def _best_variant_result(variant_results: dict[str, dict]) -> tuple[float | None, str | None, list[str]]:
+    """Find best (lowest) g(r) distance from variant results.
+
+    Returns (best_value, best_label, all_succeeded_labels).
+    """
+    best_val = None
+    best_label = None
+    succeeded = []
+    for label, r in variant_results.items():
+        if "gr_distance" in r and r.get("status") != "error":
+            succeeded.append(label)
+            if best_val is None or r["gr_distance"] < best_val:
+                best_val = r["gr_distance"]
+                best_label = label
+    return best_val, best_label, succeeded
 
 
-def load_previous_best(log_path: str) -> float | None:
-    """Load the best aggregate metric from the experiment log."""
+def load_previous_best_per_arch(log_path: str, data_name: str | None = None) -> dict[str, float]:
+    """Load best g(r) distance per architecture from the experiment log.
+
+    Scans all kept entries and tracks the best per-arch metric seen.
+    Reads the "best" field (best-of-N); falls back to "aggregate" for old entries.
+
+    Args:
+        data_name: If provided, only consider entries matching this data config
+            (e.g. "chain_N50"). Prevents cross-task contamination when switching
+            between tasks.
+
+    Returns:
+        {arch: best_metric} for every architecture that has a kept result.
+    """
     if not os.path.isfile(log_path):
-        return None
-    best = None
+        return {}
+    best: dict[str, float] = {}
     with open(log_path) as f:
         for line in f:
             try:
                 entry = json.loads(line)
-                if entry.get("kept") and "aggregate_metric" in entry:
-                    val = entry["aggregate_metric"]
-                    if best is None or val < best:
-                        best = val
             except json.JSONDecodeError:
                 continue
+            if not entry.get("kept"):
+                continue
+
+            # Filter by data config if specified (skip entries from other tasks)
+            if data_name is not None and entry.get("data") is not None:
+                if entry["data"] != data_name:
+                    continue
+
+            for arch, arch_data in entry.get("per_arch", {}).items():
+                # Prefer "best" (best-of-N), fall back to "aggregate" (old entries)
+                val = arch_data.get("best") or arch_data.get("aggregate")
+                if val is not None and (arch not in best or val < best[arch]):
+                    best[arch] = val
+
     return best
 
 
@@ -317,7 +445,7 @@ def main():
     parser = argparse.ArgumentParser(description="Autoresearch quick train+eval harness")
     parser.add_argument(
         "--archs", required=True,
-        help='Comma-separated architectures, or "all" (e.g. "transformer" or "equiv_gnn,transformer,pairformer")',
+        help='Architecture to test (e.g. "transformer", "equiv_gnn", "pairformer")',
     )
     parser.add_argument("--data", required=True, help="Data config name (e.g. hard_sphere_N50)")
     parser.add_argument("--train_time", type=float, default=10.0, help="Training time per variant in minutes (default: 10)")
@@ -326,19 +454,17 @@ def main():
     parser.add_argument("--n_ode_steps", type=int, default=50)
     parser.add_argument("--eval_samples", type=int, default=2000)
     parser.add_argument("--warmup_frac", type=float, default=0.1, help="Fraction of training time for LR warmup (default: 0.1)")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="AdamW weight decay (default: 0.01)")
     parser.add_argument("--variants", type=str, default=None, help='Variant grid: "size=xs,small;lr=1e-4,3e-4"')
+    parser.add_argument("--description", type=str, default=None, help="Experiment description (auto-logs when provided)")
     args = parser.parse_args()
     args.train_time_s = args.train_time * 60  # convert to seconds
 
-    # Parse architectures
-    if args.archs.strip().lower() == "all":
-        archs = ALL_ARCHS
-    else:
-        archs = [a.strip() for a in args.archs.split(",")]
-    for a in archs:
-        if a not in MODEL_REGISTRY:
-            print(json.dumps({"status": "error", "error": f"Unknown arch: {a}. Available: {ALL_ARCHS}"}))
-            sys.exit(1)
+    # Parse architecture (single arch for autoresearch)
+    arch = args.archs.strip()
+    if arch not in MODEL_REGISTRY:
+        print(json.dumps({"status": "error", "error": f"Unknown arch: {arch}. Available: {ALL_ARCHS}"}))
+        sys.exit(1)
 
     # Resolve data path from config name
     import yaml
@@ -350,122 +476,108 @@ def main():
         data_cfg = yaml.safe_load(f)
     data_dir = data_cfg["data_dir"]
     args.data_path = os.path.join(data_dir, "train.npz")
+    args.task_name = data_cfg.get("task", "hard_sphere")
     if not os.path.isfile(args.data_path):
         print(json.dumps({"status": "error", "error": f"Training data not found: {args.data_path}"}))
         sys.exit(1)
 
     variants = parse_variants(args.variants)
-    multi_arch = len(archs) > 1
     print(
-        f"Running {len(variants)} variants × {len(archs)} arch(s) on {args.n_gpus} GPU(s), "
+        f"Running {len(variants)} variants for {arch} on {args.n_gpus} GPU(s), "
         f"{args.train_time} min each",
         file=sys.stderr,
     )
 
-    # ── Run each architecture ─────────────────────────────────────────────
-    per_arch_results = {}   # arch -> {label: result_dict}
-    per_arch_aggregate = {} # arch -> float
+    # ── Sanity check: verify editable modules parse before launching jobs ──
+    _preflight_import_check()
 
-    for arch in archs:
-        print(f"\n{'='*60}", file=sys.stderr)
-        print(f"Architecture: {arch}", file=sys.stderr)
-        print(f"{'='*60}", file=sys.stderr)
+    # ── Run all variant jobs across GPUs ──────────────────────────────────
+    all_results = run_all_jobs([arch], args, variants, args.n_gpus)
+    best_val, best_label, succeeded = _best_variant_result(all_results[arch])
 
-        variant_results = run_variants_for_arch(arch, args, variants, args.n_gpus)
-        per_arch_results[arch] = variant_results
-
-        agg, _ = _aggregate_variant_results(variant_results)
-        if agg is not None:
-            per_arch_aggregate[arch] = agg
-            print(f"  [{arch}] Aggregate g(r) distance: {agg:.6f}", file=sys.stderr)
-        else:
-            print(f"  [{arch}] All variants failed!", file=sys.stderr)
-
-    # ── Cross-arch aggregation ────────────────────────────────────────────
-    if not per_arch_aggregate:
+    if best_val is None:
         output = {
             "status": "error",
-            "error": "All architectures failed",
-            "archs": archs,
-            "per_arch": per_arch_results,
+            "error": f"All {arch} variants failed",
+            "per_arch": {arch: {"variants": all_results[arch]}},
         }
         print(json.dumps(output, indent=2))
         sys.exit(1)
 
-    # Grand aggregate = mean of per-arch aggregates
-    grand_aggregate = sum(per_arch_aggregate.values()) / len(per_arch_aggregate)
+    n_ok = len(succeeded)
+    n_total = len(all_results[arch])
+    print(f"  [{arch}] Best g(r) distance: {best_val:.6f} ({best_label}, {n_ok}/{n_total} ok)", file=sys.stderr)
 
     # Load baseline and previous best
     baseline_path = "outputs/autoresearch/baselines.json"
     baseline_metric = load_baseline(baseline_path, args.data)
 
     log_path = "outputs/autoresearch/experiments.jsonl"
-    previous_best = load_previous_best(log_path)
+    previous_best_per_arch = load_previous_best_per_arch(log_path, data_name=args.data)
+    prev = previous_best_per_arch.get(arch)
+    kept = best_val < prev if prev is not None else True
 
-    improved = previous_best is not None and grand_aggregate < previous_best
-    if previous_best is None:
-        improved = True  # First run
-
-    # Per-arch improvement check
-    arch_improved = {}
-    if previous_best is not None:
-        for arch, agg in per_arch_aggregate.items():
-            arch_improved[arch] = agg < previous_best
-    all_archs_improved = all(arch_improved.values()) if arch_improved else False
-
-    # Build output
-    output = {
-        "status": "success",
-        "archs": archs,
-        "metric_name": "gr_distance",
-        "per_arch": {},
-        "aggregate_metric": round(grand_aggregate, 6),
-        "baseline_metric": baseline_metric,
-        "previous_best": previous_best,
-        "improved": improved,
+    # Build per-arch output (used in both JSON output and experiment log)
+    per_arch_output = {
+        arch: {
+            "variants": all_results[arch],
+            "best": round(best_val, 6),
+            "best_variant": best_label,
+            "previous_best": round(prev, 6) if prev is not None else None,
+            "improved": kept,
+        },
     }
 
-    # Per-arch detail
-    for arch in archs:
-        arch_gr_values = [
-            r["gr_distance"]
-            for r in per_arch_results[arch].values()
-            if "gr_distance" in r and r.get("status") != "error"
-        ]
-        output["per_arch"][arch] = {
-            "variants": per_arch_results[arch],
-            "aggregate": round(per_arch_aggregate[arch], 6) if arch in per_arch_aggregate else None,
-            "improved": arch_improved.get(arch),
-        }
-
-    if multi_arch:
-        output["all_archs_improved"] = all_archs_improved
-        n_improved = sum(1 for v in arch_improved.values() if v)
-        output["arch_improvement_summary"] = f"{n_improved}/{len(arch_improved)} archs improved"
-    else:
-        # Single-arch: also report per-variant improvement count
-        arch = archs[0]
-        if previous_best is not None:
-            n_variants_improved = sum(
-                1 for r in per_arch_results[arch].values()
-                if "gr_distance" in r and r.get("status") != "error" and r["gr_distance"] < previous_best
-            )
-            n_variants_total = sum(
-                1 for r in per_arch_results[arch].values()
-                if "gr_distance" in r and r.get("status") != "error"
-            )
-            output["improved_count"] = f"{n_variants_improved}/{n_variants_total} variants improved"
-        else:
-            output["improved_count"] = "first run"
+    output = {
+        "status": "success",
+        "arch": arch,
+        "metric_name": "gr_distance",
+        "per_arch": per_arch_output,
+        "best_metric": round(best_val, 6),
+        "baseline_metric": baseline_metric,
+        "previous_best": round(prev, 6) if prev is not None else None,
+        "delta": round(best_val - prev, 6) if prev is not None else None,
+        "best_variant": best_label,
+        "kept": kept,
+    }
 
     print(json.dumps(output, indent=2))
+
+    # ── Auto-log when --description is provided (#1) ──────────────────────
+    if args.description is not None:
+        from autoresearch.experiment_log import get_changed_files, log_experiment
+
+        # Only report files that are actually editable by autoresearch sessions
+        all_changed = get_changed_files(committed=False)
+        editable_prefixes = [f"models/{arch}.py", "flow_matching/"]
+        relevant_changed = [
+            f for f in all_changed
+            if any(f == p or f.startswith(p) for p in editable_prefixes)
+        ]
+
+        log_experiment(
+            log_path=log_path,
+            description=args.description,
+            archs=[arch],
+            per_arch=per_arch_output,
+            best_metric=round(best_val, 6),
+            baseline_metric=baseline_metric,
+            previous_best_per_arch={
+                a: round(v, 6) for a, v in previous_best_per_arch.items()
+            },
+            kept=kept,
+            data=args.data,
+            files_changed=relevant_changed,
+        )
+        print(f"Logged to {log_path} (kept={kept})", file=sys.stderr)
 
     # Auto-update visualization if experiment log exists
     if os.path.isfile(log_path):
         try:
             subprocess.run(
                 [sys.executable, "autoresearch/visualize.py",
-                 "--log", log_path, "--output", "outputs/autoresearch/plots"],
+                 "--log", log_path, "--output", "outputs/autoresearch/plots",
+                 "--data", args.data],
                 capture_output=True, timeout=60,
             )
         except Exception:

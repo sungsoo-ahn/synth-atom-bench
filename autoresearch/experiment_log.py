@@ -18,13 +18,21 @@ def get_git_sha() -> str:
         return "unknown"
 
 
-def get_changed_files() -> list[str]:
-    """Get list of files changed since last commit."""
+def get_changed_files(committed: bool = False) -> list[str]:
+    """Get list of files relevant to this experiment.
+
+    Args:
+        committed: True if changes were already committed (use HEAD~1..HEAD).
+            False if changes are still uncommitted (use diff against HEAD).
+            When called from auto-log in run.py, changes are always uncommitted
+            at log time (agent commits/reverts after), so default is False.
+    """
     try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        )
+        if committed:
+            cmd = ["git", "diff", "--name-only", "HEAD~1", "HEAD"]
+        else:
+            cmd = ["git", "diff", "--name-only", "HEAD"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         return [f for f in result.stdout.strip().split("\n") if f]
     except Exception:
         return []
@@ -33,27 +41,42 @@ def get_changed_files() -> list[str]:
 def log_experiment(
     log_path: str,
     description: str,
-    arch: str,
-    variant_results: dict,
-    aggregate_metric: float,
+    archs: list[str],
+    per_arch: dict[str, dict],
+    best_metric: float,
     baseline_metric: float | None,
-    previous_best: float | None,
+    previous_best_per_arch: dict[str, float | None],
     kept: bool,
+    data: str | None = None,
+    files_changed: list[str] | None = None,
 ) -> None:
-    """Append one experiment entry to the JSONL log."""
+    """Append one experiment entry to the JSONL log.
+
+    Args:
+        archs: List of architectures tested.
+        per_arch: {arch: {"variants": {...}, "best": float}} per architecture.
+        best_metric: Best g(r) distance across all variants (for single-arch runs).
+        previous_best_per_arch: {arch: best_metric_for_that_arch} from history.
+        data: Data config name (e.g. "chain_N50", "hard_sphere_N50").
+        files_changed: Explicit file list; auto-detected from git if None.
+    """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    if files_changed is None:
+        files_changed = get_changed_files(committed=False)
 
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_sha": get_git_sha(),
         "description": description,
-        "arch": arch,
-        "variants": variant_results,
-        "aggregate_metric": aggregate_metric,
+        "data": data,
+        "archs": archs,
+        "per_arch": per_arch,
+        "best_metric": best_metric,
         "baseline_metric": baseline_metric,
-        "previous_best": previous_best,
+        "previous_best_per_arch": previous_best_per_arch,
         "kept": kept,
-        "files_changed": get_changed_files(),
+        "files_changed": files_changed,
     }
 
     with open(log_path, "a") as f:

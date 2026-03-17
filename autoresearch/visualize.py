@@ -8,24 +8,11 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 
+from autoresearch.experiment_log import load_experiments
 from viz.style import ARCH_COLORS, DOUBLE_COL, save_figure, synthbench_style
 
 # Map internal arch names to display names used in ARCH_COLORS
 _DISPLAY = {"equiv_gnn": "Equiv-GNN", "transformer": "Transformer", "pairformer": "Pairformer"}
-
-
-def load_experiments(log_path: str) -> list[dict]:
-    """Load experiments from JSONL log."""
-    experiments = []
-    with open(log_path) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    experiments.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    return experiments
 
 
 def load_baseline(baseline_path: str = "outputs/autoresearch/baselines.json") -> dict:
@@ -36,14 +23,17 @@ def load_baseline(baseline_path: str = "outputs/autoresearch/baselines.json") ->
     return {}
 
 
-def _extract_per_arch_aggregates(experiment: dict) -> dict[str, float]:
-    """Extract {arch: aggregate_gr_distance} from an experiment entry."""
+def _extract_per_arch_best(experiment: dict) -> dict[str, float]:
+    """Extract {arch: best_gr_distance} from an experiment entry.
+
+    Reads "best" field (best-of-N); falls back to "aggregate" for old entries.
+    """
     result = {}
     per_arch = experiment.get("per_arch", {})
     for arch, arch_data in per_arch.items():
-        agg = arch_data.get("aggregate")
-        if agg is not None:
-            result[arch] = agg
+        val = arch_data.get("best") or arch_data.get("aggregate")
+        if val is not None:
+            result[arch] = val
     return result
 
 
@@ -93,7 +83,7 @@ def plot_progress(experiments: list[dict], baseline: float | None, output_dir: s
     for i, e in enumerate(experiments):
         kept = e.get("kept", False)
         desc = e.get("description", "")
-        per_arch = _extract_per_arch_aggregates(e)
+        per_arch = _extract_per_arch_best(e)
         for arch, agg in per_arch.items():
             arch_series.setdefault(arch, []).append((i + 1, agg, kept, desc))
 
@@ -257,7 +247,7 @@ def plot_improvement_timeline(experiments: list[dict], baseline: float | None, o
     for i, e in enumerate(experiments):
         if not e.get("kept", False):
             continue
-        per_arch = _extract_per_arch_aggregates(e)
+        per_arch = _extract_per_arch_best(e)
         for arch, agg in per_arch.items():
             if arch not in arch_best or agg < arch_best[arch]:
                 arch_best[arch] = agg

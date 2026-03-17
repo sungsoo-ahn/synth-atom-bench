@@ -158,10 +158,37 @@ class AdaLNZeroModulation(nn.Module):
         return self.linear(c).chunk(3, dim=-1)
 
 
+class OuterProductMean(nn.Module):
+    """Outer product mean: single repr -> pair repr update (AF2/AF3).
+
+    z_ij += mean over c of (linear_a(s_i) * linear_b(s_j))
+    """
+
+    def __init__(self, hidden_dim: int, pair_dim: int, opm_dim: int = 32):
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.linear_a = nn.Linear(hidden_dim, opm_dim)
+        self.linear_b = nn.Linear(hidden_dim, opm_dim)
+        self.out_proj = nn.Linear(opm_dim * opm_dim, pair_dim)
+        nn.init.constant_(self.out_proj.weight, 0)
+        nn.init.constant_(self.out_proj.bias, 0)
+
+    def forward(self, s: Tensor) -> Tensor:
+        """(B, N, hidden_dim) -> (B, N, N, pair_dim)"""
+        s = self.norm(s)
+        a = self.linear_a(s)  # (B, N, opm_dim)
+        b = self.linear_b(s)  # (B, N, opm_dim)
+        # Outer product: (B, N, 1, opm_dim) * (B, 1, N, opm_dim) -> (B, N, N, opm_dim, opm_dim)
+        outer = a.unsqueeze(2).unsqueeze(-1) * b.unsqueeze(1).unsqueeze(-2)  # (B, N, N, opm_dim, opm_dim)
+        B, N = outer.shape[:2]
+        outer = outer.reshape(B, N, N, -1)  # (B, N, N, opm_dim^2)
+        return self.out_proj(outer)
+
+
 class PairformerBlock(nn.Module):
     """Single Pairformer block with adaLN-Zero timestep conditioning.
 
-    Updates pair repr with triangle multiplications + transition,
+    Updates pair repr with outer product mean + triangle multiplications + transition,
     then updates single repr with pair-biased attention + transition.
     Timestep modulates single repr updates via scale/shift/gate (adaLN-Zero).
     """
@@ -174,6 +201,7 @@ class PairformerBlock(nn.Module):
         expansion_factor: float = 4.0,
     ):
         super().__init__()
+        self.outer_product_mean = OuterProductMean(hidden_dim, pair_dim)
         self.tri_mul_out = TriangleMultiplication(pair_dim, mode="outgoing")
         self.tri_mul_in = TriangleMultiplication(pair_dim, mode="incoming")
         self.pair_transition = Transition(pair_dim, expansion_factor)
@@ -195,6 +223,7 @@ class PairformerBlock(nn.Module):
         Returns:
             Updated (s, z).
         """
+        z = z + self.outer_product_mean(s)
         z = z + self.tri_mul_out(z)
         z = z + self.tri_mul_in(z)
         z = z + self.pair_transition(z)

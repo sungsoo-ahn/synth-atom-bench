@@ -128,23 +128,141 @@ def total_energy(positions: torch.Tensor, preset: str, params: dict) -> torch.Te
     return E
 
 
+# --- Analytic gradient functions ---
+
+
+def bond_gradient(positions: torch.Tensor, k2: float, r0: float) -> torch.Tensor:
+    """Analytic gradient of bond stretch energy. O(N).
+
+    Args:
+        positions: (..., N, 3)
+    Returns:
+        (..., N, 3) gradient tensor.
+    """
+    d = positions[..., 1:, :] - positions[..., :-1, :]  # (..., N-1, 3)
+    r = torch.linalg.norm(d, dim=-1, keepdim=True)  # (..., N-1, 1)
+    factor = 2 * k2 * (r - r0) / (r + 1e-10)  # (..., N-1, 1)
+    bond_force = factor * d
+    grad = torch.zeros_like(positions)
+    grad[..., 1:, :] += bond_force
+    grad[..., :-1, :] -= bond_force
+    return grad
+
+
+def angle_gradient(positions: torch.Tensor, k3: float, theta0: float) -> torch.Tensor:
+    """Analytic gradient of angle bending energy. O(N).
+
+    Args:
+        positions: (..., N, 3)
+    Returns:
+        (..., N, 3) gradient tensor.
+    """
+    N = positions.shape[-2]
+    if N < 3:
+        return torch.zeros_like(positions)
+    # Vectors from central atom j to neighbors i (=j-1) and k (=j+1)
+    u = positions[..., :-2, :] - positions[..., 1:-1, :]  # r_{i} - r_{j}
+    v = positions[..., 2:, :] - positions[..., 1:-1, :]   # r_{k} - r_{j}
+    u_norm = torch.linalg.norm(u, dim=-1, keepdim=True) + 1e-10
+    v_norm = torch.linalg.norm(v, dim=-1, keepdim=True) + 1e-10
+    cos_theta = (u * v).sum(dim=-1, keepdim=True) / (u_norm * v_norm)
+    cos_theta = cos_theta.clamp(-1 + 1e-7, 1 - 1e-7)
+    theta = torch.arccos(cos_theta)
+    sin_theta = torch.sin(theta).clamp(min=1e-10)
+    # dE/dtheta * dtheta/d(cos_theta) = 2*k3*(theta-theta0) * (-1/sin_theta)
+    prefactor = 2 * k3 * (theta - theta0) / (-sin_theta)
+    # d(cos_theta)/dr_i and d(cos_theta)/dr_k
+    grad_i = prefactor * (v / (u_norm * v_norm) - cos_theta * u / u_norm**2)
+    grad_k = prefactor * (u / (u_norm * v_norm) - cos_theta * v / v_norm**2)
+    grad_j = -(grad_i + grad_k)
+    grad = torch.zeros_like(positions)
+    grad[..., :-2, :] += grad_i
+    grad[..., 1:-1, :] += grad_j
+    grad[..., 2:, :] += grad_k
+    return grad
+
+
+def dihedral_gradient(positions: torch.Tensor, k4: float, phi0: float) -> torch.Tensor:
+    """Analytic gradient of dihedral energy. O(N).
+
+    Uses atan2(Y, X) formulation with explicit chain rule:
+      X = m·n, Y = |b2|*(b1·n), where m = b1×b2, n = b2×b3.
+
+    Args:
+        positions: (..., N, 3)
+    Returns:
+        (..., N, 3) gradient tensor.
+    """
+    N = positions.shape[-2]
+    if N < 4:
+        return torch.zeros_like(positions)
+    eps = 1e-10
+    b1 = positions[..., 1:-2, :] - positions[..., :-3, :]   # r_j - r_i
+    b2 = positions[..., 2:-1, :] - positions[..., 1:-2, :]   # r_k - r_j
+    b3 = positions[..., 3:, :] - positions[..., 2:-1, :]     # r_l - r_k
+    m = torch.linalg.cross(b1, b2)  # (..., N-3, 3)
+    n = torch.linalg.cross(b2, b3)  # (..., N-3, 3)
+    b2_norm = torch.linalg.norm(b2, dim=-1, keepdim=True) + eps
+    b2_hat = b2 / b2_norm
+    # atan2 quantities: phi = atan2(Y, X) matching _dihedral_angles convention
+    X = (m * n).sum(dim=-1, keepdim=True)              # m·n
+    b1_dot_n = (b1 * n).sum(dim=-1, keepdim=True)      # b1·n
+    Y = -b2_norm * b1_dot_n                             # -|b2|*(b1·n)
+    phi = torch.atan2(Y, X)
+    dE_dphi = 2 * k4 * (phi - phi0)
+    # dphi/dX = -Y/R², dphi/dY = X/R²
+    R2 = X ** 2 + Y ** 2 + eps
+    dphi_dX = -Y / R2
+    dphi_dY = X / R2
+    # Cross products needed for position derivatives
+    b2_cross_n = torch.linalg.cross(b2, n)
+    n_cross_b1 = torch.linalg.cross(n, b1)
+    b3_cross_m = torch.linalg.cross(b3, m)
+    m_cross_b2 = torch.linalg.cross(m, b2)
+    b3_cross_b1 = torch.linalg.cross(b3, b1)
+    # Y = -|b2|*(b1·n), so dY/dr = -d(|b2|*(b1·n))/dr
+    # Atom i (only b1 depends on r_i via -I):
+    dX_i = -b2_cross_n
+    dY_i = b2_norm * n  # -(−|b2|*n)
+    # Atom l (only b3 depends on r_l via +I):
+    dX_l = m_cross_b2
+    dY_l = -b2_norm * m  # -(|b2|*m)
+    # Atom j (b1 via +I, b2 via -I):
+    dX_j = b2_cross_n - n_cross_b1 - b3_cross_m
+    dY_j = -(b2_norm * n - b2_hat * b1_dot_n - b2_norm * b3_cross_b1)
+    # Atom k (b2 via +I, b3 via -I):
+    dX_k = n_cross_b1 + b3_cross_m - m_cross_b2
+    dY_k = -(b2_hat * b1_dot_n + b2_norm * b3_cross_b1 - b2_norm * m)
+    # Chain rule: dE/dr = dE/dphi * (dphi/dX * dX/dr + dphi/dY * dY/dr)
+    grad = torch.zeros_like(positions)
+    grad[..., :-3, :] += dE_dphi * (dphi_dX * dX_i + dphi_dY * dY_i)
+    grad[..., 1:-2, :] += dE_dphi * (dphi_dX * dX_j + dphi_dY * dY_j)
+    grad[..., 2:-1, :] += dE_dphi * (dphi_dX * dX_k + dphi_dY * dY_k)
+    grad[..., 3:, :] += dE_dphi * (dphi_dX * dX_l + dphi_dY * dY_l)
+    return grad
+
+
 # --- Langevin dynamics sampler ---
 
 
 def compute_gradient(positions: torch.Tensor, preset: str, params: dict) -> torch.Tensor:
-    """Compute gradient of total energy w.r.t. positions using autograd.
+    """Compute gradient of total energy w.r.t. positions using analytic formulas.
 
     Args:
-        positions: (batch, N, 3) requires_grad must be set by caller or will be set here
+        positions: (batch, N, 3)
 
     Returns:
-        (batch, N, 3) gradient tensor (detached).
+        (batch, N, 3) gradient tensor.
     """
-    if not positions.requires_grad:
-        positions.requires_grad_(True)
-    E = total_energy(positions, preset, params).sum()
-    grad = torch.autograd.grad(E, positions)[0]
-    return grad.detach()
+    grad = torch.zeros_like(positions)
+    components = PRESET_COMPONENTS[preset]
+    if "bond" in components:
+        grad = grad + bond_gradient(positions, params["k2"], params["r0"])
+    if "angle" in components:
+        grad = grad + angle_gradient(positions, params["k3"], params["theta0"])
+    if "dihedral" in components:
+        grad = grad + dihedral_gradient(positions, params["k4"], params["phi0"])
+    return grad
 
 
 def initialize_chains(
@@ -215,37 +333,45 @@ def langevin_sample(
 
         # Equilibration
         for step in range(equilibration_steps):
-            # Compute gradient with autograd
-            x_grad = x.detach().requires_grad_(True)
-            grad = compute_gradient(x_grad, preset, params)
+            grad = compute_gradient(x, preset, params)
 
             # Overdamped Langevin update
             noise = math.sqrt(2 * temperature * current_dt) * torch.randn(
                 n_chains, N, 3, device=dev, dtype=dtype, generator=gen,
             )
-            with torch.no_grad():
-                x = x - grad * current_dt + noise
+            x = x - grad * current_dt + noise
 
-                # Adaptive: if positions diverge, reduce dt
-                max_extent = x.abs().max().item()
-                if max_extent > 100 * r0 * N:
-                    current_dt *= 0.5
-                    # Re-initialize diverged chains
-                    diverged = x.abs().amax(dim=(-2, -1)) > 100 * r0 * N
-                    if diverged.any():
-                        n_diverged = diverged.sum().item()
-                        x[diverged] = initialize_chains(
-                            n_diverged, N, r0, dev, dtype, gen,
-                        )
+            # Adaptive: if positions diverge, reduce dt
+            max_extent = x.abs().max().item()
+            if max_extent > 100 * r0 * N:
+                current_dt *= 0.5
+                # Re-initialize diverged chains
+                diverged = x.abs().amax(dim=(-2, -1)) > 100 * r0 * N
+                if diverged.any():
+                    n_diverged = diverged.sum().item()
+                    x[diverged] = initialize_chains(
+                        n_diverged, N, r0, dev, dtype, gen,
+                    )
 
-        # Collect samples: center at origin
+        # Collect samples: center at origin, filter NaN/Inf
         with torch.no_grad():
             x_centered = x - x.mean(dim=-2, keepdim=True)
             energies = total_energy(x_centered, preset, params)
 
-        all_positions[collected:collected + n_chains] = x_centered.cpu().numpy()
-        all_energies[collected:collected + n_chains] = energies.cpu().numpy()
-        collected += n_chains
+            # Filter out diverged chains (NaN or very large positions)
+            valid = torch.isfinite(x_centered).all(dim=(-2, -1)) & torch.isfinite(energies)
+            x_valid = x_centered[valid].cpu().numpy()
+            e_valid = energies[valid].cpu().numpy()
+
+        n_valid = len(x_valid)
+        n_to_store = min(n_valid, num_samples - collected)
+        all_positions[collected:collected + n_to_store] = x_valid[:n_to_store]
+        all_energies[collected:collected + n_to_store] = e_valid[:n_to_store]
+        collected += n_to_store
+
+        if n_valid < n_chains:
+            n_bad = n_chains - n_valid
+            print(f" ({n_bad} diverged)", end="", flush=True)
 
         elapsed = time.time() - t0
         rate = collected / elapsed if elapsed > 0 else 0

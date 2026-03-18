@@ -22,11 +22,14 @@ def flow_matching_loss(model: nn.Module, x_0: Tensor) -> Tensor:
     t = torch.sigmoid(torch.randn(batch_size, device=x_0.device))
     x_t, noise, velocity_target = interpolate(x_0, t)
     v_pred = model(x_t, t)
+
+    # x1-prediction: derive x1 from velocity, supervise on clean data directly
+    t_expand = t[:, None, None]
+    x_1_pred = x_t + (1 - t_expand) * v_pred
     weight = (t / (1 - t + 1e-5)) ** 2
-    main_loss = (weight[:, None, None] * (v_pred - velocity_target) ** 2).mean()
+    main_loss = (weight[:, None, None] * (x_1_pred - x_0) ** 2).mean()
 
     # Auxiliary pairwise distance loss, upweighted late in the flow
-    x_1_pred = x_t + (1 - t[:, None, None]) * v_pred
     dist_pred = torch.cdist(x_1_pred, x_1_pred)  # (B, N, N)
     dist_true = torch.cdist(x_0, x_0)  # (B, N, N)
     t_weight = 1 + 8 * torch.relu(t - 0.5)

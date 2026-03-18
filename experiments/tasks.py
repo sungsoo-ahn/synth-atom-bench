@@ -30,7 +30,7 @@ class Task(ABC):
         """Return a human-readable description of the dataset."""
 
     @abstractmethod
-    def data_generator_cmd(self, n_atoms: int, n_samples: int, output_path: str) -> str:
+    def data_generator_cmd(self, n_atoms: int, n_samples: int, output_path: str, **kwargs) -> str:
         """Return shell command to generate data for this task."""
 
 
@@ -58,9 +58,13 @@ class MultibodyTask(Task):
             f"T={dataset.temperature}, box_size={dataset.box_size:.4f}"
         )
 
-    def data_generator_cmd(self, n_atoms: int, n_samples: int, output_path: str) -> str:
+    def data_generator_cmd(
+        self, n_atoms: int, n_samples: int, output_path: str,
+        preset: str = "multibody_23", temperature: float = 1.0,
+    ) -> str:
         return (
             f"uv run python data/generate_multibody.py --N {n_atoms} "
+            f"--preset {preset} --T {temperature} "
             f"--num_samples {n_samples} --output {output_path}"
         )
 

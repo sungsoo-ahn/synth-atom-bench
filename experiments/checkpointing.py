@@ -26,6 +26,7 @@ def save_checkpoint(state: CheckpointState, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    os.close(fd)  # close mkstemp fd; torch.save opens by path
     try:
         torch.save(
             {
@@ -40,12 +41,9 @@ def save_checkpoint(state: CheckpointState, path: str | Path) -> None:
         )
         os.replace(tmp_path, path)
     except BaseException:
-        os.close(fd)
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise
-    else:
-        os.close(fd)
 
 
 def load_checkpoint(path: str | Path, device: str = "cpu") -> CheckpointState:

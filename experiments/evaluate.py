@@ -53,7 +53,7 @@ def main():
     dataset = task.load_dataset(train_path)
     print(f"Data: {task.describe_data(dataset)}")
     box_size = dataset.box_size
-    radius = dataset.radius
+    radius = dataset.r0 / 2
     n_atoms = dataset.positions.shape[1]
 
     # Build and load model

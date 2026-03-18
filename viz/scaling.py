@@ -24,7 +24,7 @@ def fit_scaling_law(
         (a, alpha, floor) tuple.
     """
     p0 = [1.0, 0.5, max(min(metric) * 0.5, 1e-6)]
-    bounds = ([0, 0, 0], [np.inf, 5.0, 1.0])
+    bounds = ([0, 0, 0], [np.inf, 5.0, np.inf])
     popt, _ = curve_fit(_power_law, flops, metric, p0=p0, bounds=bounds,
                         maxfev=10000)
     return tuple(popt)

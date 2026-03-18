@@ -107,6 +107,7 @@ def generate_grid(args):
             f"model.size={size} "
             f"train.lr={lr} "
             f"train.max_steps={max_steps} "
+            f"train.batch_size={batch_size} "
             f"{model_overrides} "
             f"checkpoint.dir={ckpt_dir} "
             f"logging.enabled=true "

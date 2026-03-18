@@ -16,7 +16,7 @@ from experiments.model_registry import ARCH_DISPLAY_NAMES, MODEL_DEFAULTS, MODEL
 from experiments.tasks import TASK_REGISTRY
 
 BUDGETS_DEFAULT = [1e15, 4e15, 1.6e16, 6.4e16, 2.56e17]
-LEARNING_RATES = [1e-4, 1e-3]
+LEARNING_RATES = [1e-3]
 ALL_SIZES = ["xs", "small", "medium", "large", "xl"]
 MIN_STEPS = 2000
 MAX_STEPS = 1_000_000
@@ -40,7 +40,8 @@ def log(msg: str):
 # ── Stage 1: Data check / generation ──────────────────────────────────────────
 
 
-def ensure_data(task_name: str, n_atoms: int, data_dir: str):
+def ensure_data(task_name: str, n_atoms: int, data_dir: str,
+                preset: str = "multibody_23", temperature: float = 1.0):
     """Generate train/val/test data if it doesn't exist."""
     task = TASK_REGISTRY[task_name]()
 
@@ -58,7 +59,10 @@ def ensure_data(task_name: str, n_atoms: int, data_dir: str):
         if os.path.isfile(path):
             log(f"  {split}.npz exists, skipping")
             continue
-        cmd = task.data_generator_cmd(n_atoms, n_samples, path)
+        cmd = task.data_generator_cmd(
+            n_atoms, n_samples, path,
+            preset=preset, temperature=temperature,
+        )
         # Use different seeds per split
         seed = {"train": 42, "val": 123, "test": 456}[split]
         cmd += f" --seed {seed}"
@@ -193,6 +197,8 @@ def generate_grid(
             f"model.size={size} "
             f"train.lr={lr} "
             f"train.max_steps={max_steps} "
+            f"train.batch_size={batch_size} "
+            f"eval.early_stopping_patience=5 "
             f"{model_overrides} "
             f"checkpoint.dir={ckpt_dir} "
             f"logging.enabled=true "
@@ -218,7 +224,7 @@ def generate_grid(
 
 
 def is_job_complete(scaling_dir: str, run_name: str) -> bool:
-    """Check if a job has already completed."""
+    """Check if a job has already completed (finished all steps or early-stopped)."""
     run_dir = os.path.join(scaling_dir, run_name)
     latest_pt = os.path.join(run_dir, "latest.pt")
     if not os.path.isfile(latest_pt):
@@ -228,7 +234,12 @@ def is_job_complete(scaling_dir: str, run_name: str) -> bool:
         saved_step = data.get("step", 0)
         config = data.get("config", {})
         max_steps = config.get("train", {}).get("max_steps", 0)
-        return max_steps > 0 and saved_step >= max_steps
+        if max_steps > 0 and saved_step >= max_steps:
+            return True
+        # Check for early stopping: a "done" marker file written on clean exit
+        if os.path.isfile(os.path.join(run_dir, ".done")):
+            return True
+        return False
     except Exception:
         return False
 
@@ -539,7 +550,11 @@ def main():
         epilog="Example: uv run python experiments/scaling_auto.py --task multibody --n_atoms 50 --archs transformer",
     )
     parser.add_argument("--task", default="multibody", choices=list(TASK_REGISTRY.keys()))
-    parser.add_argument("--n_atoms", type=int, default=50)
+    parser.add_argument("--n_atoms", type=int, default=20)
+    parser.add_argument("--preset", default="multibody_23",
+                        help="Potential preset (e.g. multibody_2, multibody_23, multibody_234)")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="Temperature for data generation")
     parser.add_argument("--archs", default="transformer")
     parser.add_argument("--budgets", default=None, help="Comma-separated FLOP budgets")
     parser.add_argument("--sizes", default=None, help="Comma-separated sizes (default: all)")
@@ -555,18 +570,24 @@ def main():
     lrs = [float(x) for x in args.lrs.split(",")] if args.lrs else LEARNING_RATES
     budgets = [float(x) for x in args.budgets.split(",")] if args.budgets else BUDGETS_DEFAULT
 
-    data_name = f"{args.task}_N{args.n_atoms}"
+    # Format temperature: use int if whole number (e.g. "1.0" -> "1.0", "0.5" -> "0.5")
+    T_str = f"{args.temperature}"
+    if "." not in T_str:
+        T_str += ".0"
+    data_name = f"{args.preset}_N{args.n_atoms}_T{T_str}"
     data_dir = f"outputs/data/{data_name}"
     scaling_dir = args.output_dir or f"outputs/scaling/{data_name}"
     flops_cache_path = os.path.join(scaling_dir, "flops_cache.json")
 
-    log(f"Task: {args.task}, N={args.n_atoms}, archs={archs}")
+    log(f"Task: {args.task}, preset={args.preset}, N={args.n_atoms}, T={args.temperature}, archs={archs}")
     log(f"Budgets: {[f'{b:.0e}' for b in budgets]}")
+    log(f"Data: {data_name} → {data_dir}")
     log(f"Output: {scaling_dir}")
 
     # Stage 1: Data
     log("\n=== Stage 1: Data check/generation ===")
-    ensure_data(args.task, args.n_atoms, data_dir)
+    ensure_data(args.task, args.n_atoms, data_dir,
+                preset=args.preset, temperature=args.temperature)
 
     # Stage 2: Oracle baseline
     log("\n=== Stage 2: Oracle baseline ===")

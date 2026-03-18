@@ -262,6 +262,11 @@ def main(cfg: DictConfig) -> None:
     step = start_step
     data_iter = iter(loader)
     use_rotation = cfg.augmentation.random_rotation
+    early_stopping_patience = cfg.eval.get("early_stopping_patience", 0)
+    evals_without_improvement = 0
+    prev_best_ew = ckpt_mgr.best_energy_wasserstein
+    if early_stopping_patience:
+        print(f"  Early stopping: patience={early_stopping_patience} evals")
     print(f"\nTraining for {cfg.train.max_steps} steps (starting from {start_step})...")
 
     while step < cfg.train.max_steps:
@@ -321,6 +326,17 @@ def main(cfg: DictConfig) -> None:
                           energy_wasserstein=ew, config=config_dict)
             print(_format_eval_msg(step, ev, ckpt_mgr.best_energy_wasserstein))
 
+            # Early stopping check
+            if early_stopping_patience:
+                if ckpt_mgr.best_energy_wasserstein < prev_best_ew:
+                    prev_best_ew = ckpt_mgr.best_energy_wasserstein
+                    evals_without_improvement = 0
+                else:
+                    evals_without_improvement += 1
+                    if evals_without_improvement >= early_stopping_patience:
+                        print(f"\n  Early stopping: no improvement for {early_stopping_patience} evals")
+                        break
+
         # Periodic checkpoint (without eval) — carry forward best metrics
         elif step % cfg.checkpoint.every_n_steps == 0:
             ckpt_mgr.save(
@@ -338,6 +354,11 @@ def main(cfg: DictConfig) -> None:
     ckpt_mgr.save(model, optimizer, epoch=0, step=step,
                   energy_wasserstein=ew, config=config_dict)
     print(_format_eval_msg("Final", ev, ckpt_mgr.best_energy_wasserstein))
+
+    # Write completion marker (for scaling pipeline resumability with early stopping)
+    done_path = os.path.join(checkpoint_dir, ".done")
+    with open(done_path, "w") as f:
+        f.write(f"step={step}\n")
 
     logger.finish()
     if torch.cuda.is_available():

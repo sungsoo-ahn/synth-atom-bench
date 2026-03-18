@@ -36,6 +36,9 @@ def sample(
     import math
     t_schedule = [0.5 * (1 - math.cos(math.pi * i / n_steps)) for i in range(n_steps + 1)]
 
+    langevin_alpha = 0.2  # noise scale for Langevin corrections
+    n_corrector = 1       # corrector steps per ODE step
+
     for i in range(n_steps):
         t_i = t_schedule[i]
         t_next_i = t_schedule[i + 1]
@@ -46,6 +49,16 @@ def sample(
         t_next = torch.full((n_samples,), t_next_i, device=device)
         v2 = model(x_pred, t_next)
         x = x + 0.5 * dt * (v1 + v2)
+
+        # Langevin corrector: velocity-to-score conversion + noise injection
+        if t_next_i > 0.01 and t_next_i < 0.99:
+            for _ in range(n_corrector):
+                t_c = torch.full((n_samples,), t_next_i, device=device)
+                v = model(x, t_c)
+                # score = (t*v - x) / (t*(1-t))  from velocity-to-score identity
+                score = (t_next_i * v - x) / (t_next_i * (1 - t_next_i) + 1e-5)
+                step_size = langevin_alpha * t_next_i * (1 - t_next_i)
+                x = x + step_size * score + (2 * step_size) ** 0.5 * torch.randn_like(x)
 
     return x
 

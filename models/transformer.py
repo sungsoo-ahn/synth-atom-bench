@@ -31,8 +31,34 @@ class RMSNorm(nn.Module):
         return self.scale * x / (rms + self.eps)
 
 
+def _apply_3d_rope(x: Tensor, positions: Tensor, head_dim: int) -> Tensor:
+    """Apply 3D rotary position embeddings from spatial coordinates.
+
+    Args:
+        x: (B, H, N, D) query or key tensor.
+        positions: (B, N, 3) spatial coordinates.
+        head_dim: dimension per head.
+    Returns:
+        (B, H, N, D) with RoPE applied.
+    """
+    # Split head_dim into 3 pairs for x,y,z (remaining dims unchanged)
+    n_rope_pairs = min(head_dim // 2, 3)  # up to 3 coordinate dims
+    freqs = torch.exp(
+        -torch.arange(n_rope_pairs, device=x.device, dtype=x.dtype) * (4.0 / n_rope_pairs)
+    )  # (n_rope_pairs,)
+    # positions: (B, N, 3) -> angles: (B, N, n_rope_pairs)
+    angles = positions[..., :n_rope_pairs] * freqs  # (B, N, n_rope_pairs)
+    cos_a = angles.cos().unsqueeze(1)  # (B, 1, N, n_rope_pairs)
+    sin_a = angles.sin().unsqueeze(1)  # (B, 1, N, n_rope_pairs)
+    # Apply rotation to first 2*n_rope_pairs dims of head
+    x1 = x[..., :n_rope_pairs]
+    x2 = x[..., n_rope_pairs:2 * n_rope_pairs]
+    x_rot = torch.cat([x1 * cos_a - x2 * sin_a, x1 * sin_a + x2 * cos_a, x[..., 2 * n_rope_pairs:]], dim=-1)
+    return x_rot
+
+
 class SelfAttention(nn.Module):
-    """Multi-head self-attention with QK normalization and attention bias."""
+    """Multi-head self-attention with QK normalization, 3D RoPE, and attention bias."""
 
     def __init__(self, hidden_dim: int, num_heads: int):
         super().__init__()
@@ -45,13 +71,18 @@ class SelfAttention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim)
         self.proj = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, x: Tensor, bias: Tensor | None = None) -> Tensor:
+    def forward(self, x: Tensor, bias: Tensor | None = None, positions: Tensor | None = None) -> Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, N, D)
         q, k, v = qkv.unbind(0)
 
         q, k = self.q_norm(q), self.k_norm(k)
+
+        # Apply 3D RoPE from spatial coordinates
+        if positions is not None:
+            q = _apply_3d_rope(q, positions, self.head_dim)
+            k = _apply_3d_rope(k, positions, self.head_dim)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         if bias is not None:
@@ -112,11 +143,11 @@ class DiTBlock(nn.Module):
         nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
 
-    def forward(self, x: Tensor, c: Tensor, bias: Tensor | None = None) -> Tensor:
+    def forward(self, x: Tensor, c: Tensor, bias: Tensor | None = None, positions: Tensor | None = None) -> Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=-1)
         )
-        h = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), bias=bias)
+        h = self.attn(modulate(self.norm1(x), shift_msa, scale_msa), bias=bias, positions=positions)
         x = x + self.residual_scale * gate_msa.unsqueeze(1) * h
         h = self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         x = x + self.residual_scale * gate_mlp.unsqueeze(1) * h
@@ -239,6 +270,6 @@ class TransformerVelocityNetwork(nn.Module):
         c = self.time_proj(self.time_embed(t))
 
         for block in self.blocks:
-            x = block(x, c, bias=pair_bias)
+            x = block(x, c, bias=pair_bias, positions=positions)
 
         return self.final_layer(x, c)

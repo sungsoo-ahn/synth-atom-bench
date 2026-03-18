@@ -38,7 +38,7 @@ def hero_structures():
                 return
             data = np.load(data_path)
             positions = data["positions"][0]
-            radius = float(data["radius"])
+            radius = float(data["r0"]) / 2
             box_size = float(data["box_size"]) if "box_size" in data else None
 
             ax = axes[col]

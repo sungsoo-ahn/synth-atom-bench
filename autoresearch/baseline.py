@@ -30,7 +30,8 @@ def compute_oracle_energy_wasserstein(
     data = np.load(data_path)
     positions = data["positions"]
     box_size = float(data["box_size"])
-    radius = float(data["radius"])
+    r0 = float(data["r0"])
+    radius = r0 / 2
     preset = str(data["preset"])
     temperature = float(data["temperature"])
     k2 = float(data["k2"])

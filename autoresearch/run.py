@@ -74,7 +74,7 @@ def quick_train_eval(
     dataset = task.load_dataset(data_path)
     box_size = dataset.box_size
     n_atoms = dataset.positions.shape[1]
-    radius = dataset.radius
+    radius = dataset.r0 / 2
 
 
     # Center positions for flow matching

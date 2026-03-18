@@ -20,7 +20,7 @@ OUT_DIR = _project_root / "outputs" / "plots" / "examples"
 def _load_test_data():
     path = _project_root / "outputs" / "data" / "multibody_23_N10_T1.0" / "train.npz"
     data = np.load(path)
-    return data["positions"], float(data["radius"]), float(data["box_size"])
+    return data["positions"], float(data["r0"]) / 2, float(data["box_size"])
 
 
 def example_structure_grid():
